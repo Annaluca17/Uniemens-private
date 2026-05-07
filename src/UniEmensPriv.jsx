@@ -206,7 +206,7 @@ function calcSettimane(annoMese, giorni, lav = {}) {
     else s.N++;
   });
 
-  return [...settMap.entries()]
+  const result = [...settMap.entries()]
     .filter(([id]) => id >= firstWeek && id <= lastWeek)
     .sort((a,b) => a[0]-b[0])
     .map(([id, c]) => {
@@ -214,10 +214,29 @@ function calcSettimane(annoMese, giorni, lav = {}) {
       if (c.MAT > 0 && c.X === 0) tc = "1";
       else if (c.MAL > 0 && c.X > 0) tc = "2";
       else if (c.X > 0) tc = "X";
-      else if (hasRetribuzione) tc = "X"; // retributed worker: week in employment period is covered
       const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
       return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
     });
+
+  // Ensure settimane_lavorate satisfies INPS constraints:
+  // - settimane_lavorate <= GiorniRetribuiti (else 02560E)
+  // - settimane_lavorate * 6 >= GiorniRetribuiti (else 02570E)
+  // - settimane_lavorate > 0 if GiorniRetribuiti > 0 (else 02580E)
+  const giorniRet = parseIt(lav.GiorniRetribuiti);
+  if (giorniRet > 0) {
+    const nLav = result.filter(s => s.TipoCopertura !== "0").length;
+    if (nLav === 0 || nLav * 6 < giorniRet) {
+      let count = nLav;
+      for (let i = 0; i < result.length && count * 6 < giorniRet; i++) {
+        if (result[i].TipoCopertura === "0") {
+          result[i] = { ...result[i], TipoCopertura: "X" };
+          count++;
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
 function calcTotDebito(lavs, altrePartite = []) {
