@@ -176,10 +176,21 @@ function isoWeekForDay(d) {
   return isoWeek(d);
 }
 
-function calcSettimane(annoMese, giorni) {
+function calcSettimane(annoMese, giorni, lav = {}) {
   if (!annoMese) return [];
   const [y, m] = annoMese.split("-").map(Number);
   if (!y || !m) return [];
+
+  // Employment period within the month (assunzione/cessazione)
+  const nDays = giorniMese(annoMese);
+  const firstDay = lav.hasAssunzione ? Math.max(1, parseInt(lav.GiornoAssunzione) || 1) : 1;
+  const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
+  const firstWeek = isoWeekForDay(new Date(y, m-1, firstDay));
+  const lastWeek  = isoWeekForDay(new Date(y, m-1, lastDay));
+
+  // Worker has retribution even if individual days are not marked as lavorato=S
+  const hasRetribuzione = parseIt(lav.GiorniRetribuiti) > 0 || parseIt(lav.Contributo) > 0;
+
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
     const d = new Date(y, m-1, gg);
@@ -194,14 +205,19 @@ function calcSettimane(annoMese, giorni) {
     else if (evento?.codice === "MAL") s.MAL++;
     else s.N++;
   });
-  return [...settMap.entries()].sort((a,b)=>a[0]-b[0]).map(([id,c]) => {
-    let tc = "0";
-    if (c.MAT > 0 && c.X === 0) tc = "1";
-    else if (c.MAL > 0 && c.X > 0) tc = "2";
-    else if (c.X > 0) tc = "X";
-    const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
-    return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
-  });
+
+  return [...settMap.entries()]
+    .filter(([id]) => id >= firstWeek && id <= lastWeek)
+    .sort((a,b) => a[0]-b[0])
+    .map(([id, c]) => {
+      let tc = "0";
+      if (c.MAT > 0 && c.X === 0) tc = "1";
+      else if (c.MAL > 0 && c.X > 0) tc = "2";
+      else if (c.X > 0) tc = "X";
+      else if (hasRetribuzione) tc = "X"; // retributed worker: week in employment period is covered
+      const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
+      return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
+    });
 }
 
 function calcTotDebito(lavs, altrePartite = []) {
@@ -591,7 +607,7 @@ function buildPrivXML(cfg, aziende) {
         if (lav.RetribTeorica) x += `          <RetribTeorica>${esc(lav.RetribTeorica)}</RetribTeorica>\n`;
         if (lav.OreLavorabili) x += `          <OreLavorabili>${esc(lav.OreLavorabili)}</OreLavorabili>\n`;
 
-        const setts = calcSettimane(az.AnnoMese, lav.giorni);
+        const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
         for (const s of setts) {
           x += `          <Settimana>\n`;
           x += `            <IdSettimana>${s.IdSettimana}</IdSettimana>\n`;
@@ -1196,7 +1212,7 @@ function renderCollabForm(az, c, updateCollab) {
 function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav) {
   const upd = (patch) => updateLav(az.id, pos.id, lav.id, patch);
   const ggLav = countGiorniLav(lav.giorni);
-  const setts = calcSettimane(az.AnnoMese, lav.giorni);
+  const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
   const isNR00 = lav.TipoLavStat === "NR00";
 
   return (
