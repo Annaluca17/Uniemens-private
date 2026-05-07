@@ -226,10 +226,14 @@ function calcSettimane(annoMese, giorni, lav = {}) {
   if (giorniRet > 0) {
     const nLav = result.filter(s => s.TipoCopertura !== "0").length;
     if (nLav === 0 || nLav * 6 < giorniRet) {
+      // Determine upgrade TC from DifferenzeAccredito events (MAL → TC=2, else TC=X)
+      const daEventi = (lav.DifferenzeAccredito || []).map(d => d.CodiceEvento).filter(Boolean);
+      const upgradeTc = daEventi.includes("MAL") ? "2" : "X";
+      const upgradeCe = upgradeTc === "2" ? "MAL" : null;
       let count = nLav;
       for (let i = 0; i < result.length && count * 6 < giorniRet; i++) {
         if (result[i].TipoCopertura === "0") {
-          result[i] = { ...result[i], TipoCopertura: "X" };
+          result[i] = { ...result[i], TipoCopertura: upgradeTc, CodiceEvento: upgradeCe };
           count++;
         }
       }
@@ -249,7 +253,8 @@ function calcTotDebito(lavs, altrePartite = []) {
 function calcTotCredito(lavs) {
   return Math.round(lavs.reduce((s, l) =>
     s + l.InfoAggCausali.reduce((ss, c) => ss + (parseIt(c.ImportoRif) || 0), 0) +
-    (l.MisureCompensative || []).reduce((ss, mc) => ss + (parseIt(mc.ImportoMCACred) || 0), 0), 0));
+    (l.MisureCompensative || []).reduce((ss, mc) => ss + (parseIt(mc.ImportoMCACred) || 0), 0) +
+    (parseIt(l.IndMat1Fascia) || 0) + (parseIt(l.IndMat2Fascia) || 0), 0));
 }
 function countGiorniLav(giorni) {
   return giorni.filter(g => g.lavorato === "S").length;
