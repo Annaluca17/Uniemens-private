@@ -433,7 +433,7 @@ function parsePrivXML(xmlStr) {
           if (meseEl) {
             lav.BaseCalcoloTFR = childTxt(meseEl, "BaseCalcoloTFR");
             lav.BaseCalcoloPrevCompl = childTxt(meseEl, "BaseCalcoloPrevCompl");
-            const mcEls = directChildren(meseEl.querySelector("MisureCompensative") || document.createElement("x"), "MisCompACredito");
+            const mcEls = directChildren(meseEl.querySelector("MisureCompensative"), "MisCompACredito");
             for (const mc of mcEls) {
               lav.MisureCompensative.push({
                 id: uid(),
