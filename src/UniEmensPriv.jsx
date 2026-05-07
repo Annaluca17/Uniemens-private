@@ -156,11 +156,24 @@ function isoWeek(d) {
   return 1 + Math.round(((tmp - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
 }
 
-function weekMondayMonth(d) {
-  // Returns {y, m} of the ISO week's Monday for date d
-  const dow = (d.getDay() + 6) % 7; // 0=Mon, 6=Sun
+function weekEffectiveMonday(d) {
+  // In UniEmens Sunday belongs to the FOLLOWING week: use next Monday for attribution
+  if (d.getDay() === 0) {
+    const next = new Date(d); next.setDate(d.getDate() + 1);
+    return next; // next day is already Monday
+  }
+  const dow = (d.getDay() + 6) % 7; // 0=Mon
   const mon = new Date(d); mon.setDate(d.getDate() - dow);
-  return { m: mon.getMonth() + 1, y: mon.getFullYear() };
+  return mon;
+}
+
+function isoWeekForDay(d) {
+  // In UniEmens Sunday belongs to the following week (isoWeek of next Monday)
+  if (d.getDay() === 0) {
+    const next = new Date(d); next.setDate(d.getDate() + 1);
+    return isoWeek(next);
+  }
+  return isoWeek(d);
 }
 
 function calcSettimane(annoMese, giorni) {
@@ -170,10 +183,10 @@ function calcSettimane(annoMese, giorni) {
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
     const d = new Date(y, m-1, gg);
-    // Include only weeks whose Monday falls in the target month (INPS rule 02920E)
-    const mon = weekMondayMonth(d);
-    if (mon.y !== y || mon.m !== m) return;
-    const w = isoWeek(d);
+    // Week belongs to month if its effective Monday (Sun→next Mon) is in the month
+    const mon = weekEffectiveMonday(d);
+    if (mon.getMonth() + 1 !== m || mon.getFullYear() !== y) return;
+    const w = isoWeekForDay(d);
     if (!settMap.has(w)) settMap.set(w, {X:0, MAT:0, MAL:0, N:0});
     const s = settMap.get(w);
     if (lavorato === "S") s.X++;
