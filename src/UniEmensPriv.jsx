@@ -156,6 +156,13 @@ function isoWeek(d) {
   return 1 + Math.round(((tmp - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
 }
 
+function weekThursdayMonth(d) {
+  // Returns the month (1-12) of the ISO week's Thursday for date d
+  const dow = (d.getDay() + 6) % 7; // 0=Mon, 6=Sun
+  const thu = new Date(d); thu.setDate(d.getDate() - dow + 3);
+  return { m: thu.getMonth() + 1, y: thu.getFullYear() };
+}
+
 function calcSettimane(annoMese, giorni) {
   if (!annoMese) return [];
   const [y, m] = annoMese.split("-").map(Number);
@@ -163,6 +170,9 @@ function calcSettimane(annoMese, giorni) {
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
     const d = new Date(y, m-1, gg);
+    // Skip days whose ISO week's Thursday falls outside the target month (INPS rule 02920E)
+    const thu = weekThursdayMonth(d);
+    if (thu.y !== y || thu.m !== m) return;
     const w = isoWeek(d);
     if (!settMap.has(w)) settMap.set(w, {X:0, MAT:0, MAL:0, N:0});
     const s = settMap.get(w);
@@ -181,12 +191,17 @@ function calcSettimane(annoMese, giorni) {
   });
 }
 
-function calcTotDebito(lavs) {
-  return Math.round(lavs.reduce((s,l) => s + (parseIt(l.Contributo)||0), 0));
+function calcTotDebito(lavs, altrePartite = []) {
+  const fromLav = lavs.reduce((s, l) =>
+    s + (parseIt(l.Contributo) || 0) +
+    (l.AltreADebito || []).reduce((ss, ad) => ss + (parseIt(ad.ImportoADebito) || 0), 0), 0);
+  const fromAltrePartite = (altrePartite || []).reduce((s, apd) => s + (parseIt(apd.SommaADebito) || 0), 0);
+  return Math.round(fromLav + fromAltrePartite);
 }
 function calcTotCredito(lavs) {
-  return Math.round(lavs.reduce((s,l) =>
-    s + l.InfoAggCausali.reduce((ss,c) => ss + (parseIt(c.ImportoRif)||0), 0), 0));
+  return Math.round(lavs.reduce((s, l) =>
+    s + l.InfoAggCausali.reduce((ss, c) => ss + (parseIt(c.ImportoRif) || 0), 0) +
+    (l.MisureCompensative || []).reduce((ss, mc) => ss + (parseIt(mc.ImportoMCACred) || 0), 0), 0));
 }
 function countGiorniLav(giorni) {
   return giorni.filter(g => g.lavorato === "S").length;
@@ -516,7 +531,7 @@ function buildPrivXML(cfg, aziende) {
         if (lav.TipoApplCongedoParOre) x += `        <TipoApplCongedoParOre>${esc(lav.TipoApplCongedoParOre)}</TipoApplCongedoParOre>\n`;
         if (lav.TipoRetrMal) x += `        <TipoRetrMal>${esc(lav.TipoRetrMal)}</TipoRetrMal>\n`;
         if (lav.PercPartTime) x += `        <PercPartTime>${esc(lav.PercPartTime)}</PercPartTime>\n`;
-        if (lav.PercPartTimeMese && lav.PercPartTimeMese !== lav.PercPartTime)
+        if (lav.PercPartTimeMese)
           x += `        <PercPartTimeMese>${esc(lav.PercPartTimeMese)}</PercPartTimeMese>\n`;
         x += `        <NumMensilita>${esc(lav.NumMensilita)}</NumMensilita>\n`;
 
@@ -650,7 +665,7 @@ function buildPrivXML(cfg, aziende) {
       }
 
       const nLav = pos.lavoratori.length;
-      const totDeb = calcTotDebito(pos.lavoratori);
+      const totDeb = calcTotDebito(pos.lavoratori, az.AltrePartiteADebito);
       const totCred = calcTotCredito(pos.lavoratori);
       const forza = pos.ForzaAziendale || String(nLav);
       x += `      <DenunciaAziendale>\n`;
