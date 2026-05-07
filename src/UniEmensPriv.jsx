@@ -156,11 +156,11 @@ function isoWeek(d) {
   return 1 + Math.round(((tmp - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
 }
 
-function weekThursdayMonth(d) {
-  // Returns the month (1-12) of the ISO week's Thursday for date d
+function weekMondayMonth(d) {
+  // Returns {y, m} of the ISO week's Monday for date d
   const dow = (d.getDay() + 6) % 7; // 0=Mon, 6=Sun
-  const thu = new Date(d); thu.setDate(d.getDate() - dow + 3);
-  return { m: thu.getMonth() + 1, y: thu.getFullYear() };
+  const mon = new Date(d); mon.setDate(d.getDate() - dow);
+  return { m: mon.getMonth() + 1, y: mon.getFullYear() };
 }
 
 function calcSettimane(annoMese, giorni) {
@@ -170,9 +170,9 @@ function calcSettimane(annoMese, giorni) {
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
     const d = new Date(y, m-1, gg);
-    // Skip days whose ISO week's Thursday falls outside the target month (INPS rule 02920E)
-    const thu = weekThursdayMonth(d);
-    if (thu.y !== y || thu.m !== m) return;
+    // Include only weeks whose Monday falls in the target month (INPS rule 02920E)
+    const mon = weekMondayMonth(d);
+    if (mon.y !== y || mon.m !== m) return;
     const w = isoWeek(d);
     if (!settMap.has(w)) settMap.set(w, {X:0, MAT:0, MAL:0, N:0});
     const s = settMap.get(w);
