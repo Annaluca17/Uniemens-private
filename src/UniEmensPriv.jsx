@@ -156,14 +156,48 @@ function isoWeek(d) {
   return 1 + Math.round(((tmp - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
 }
 
-function calcSettimane(annoMese, giorni) {
+function weekEffectiveMonday(d) {
+  // In UniEmens Sunday belongs to the FOLLOWING week: use next Monday for attribution
+  if (d.getDay() === 0) {
+    const next = new Date(d); next.setDate(d.getDate() + 1);
+    return next; // next day is already Monday
+  }
+  const dow = (d.getDay() + 6) % 7; // 0=Mon
+  const mon = new Date(d); mon.setDate(d.getDate() - dow);
+  return mon;
+}
+
+function isoWeekForDay(d) {
+  // In UniEmens Sunday belongs to the following week (isoWeek of next Monday)
+  if (d.getDay() === 0) {
+    const next = new Date(d); next.setDate(d.getDate() + 1);
+    return isoWeek(next);
+  }
+  return isoWeek(d);
+}
+
+function calcSettimane(annoMese, giorni, lav = {}) {
   if (!annoMese) return [];
   const [y, m] = annoMese.split("-").map(Number);
   if (!y || !m) return [];
+
+  // Employment period within the month (assunzione/cessazione)
+  const nDays = giorniMese(annoMese);
+  const firstDay = lav.hasAssunzione ? Math.max(1, parseInt(lav.GiornoAssunzione) || 1) : 1;
+  const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
+  const firstWeek = isoWeekForDay(new Date(y, m-1, firstDay));
+  const lastWeek  = isoWeekForDay(new Date(y, m-1, lastDay));
+
+  // Worker has retribution even if individual days are not marked as lavorato=S
+  const hasRetribuzione = parseIt(lav.GiorniRetribuiti) > 0 || parseIt(lav.Contributo) > 0;
+
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
     const d = new Date(y, m-1, gg);
-    const w = isoWeek(d);
+    // Week belongs to month if its effective Monday (Sun→next Mon) is in the month
+    const mon = weekEffectiveMonday(d);
+    if (mon.getMonth() + 1 !== m || mon.getFullYear() !== y) return;
+    const w = isoWeekForDay(d);
     if (!settMap.has(w)) settMap.set(w, {X:0, MAT:0, MAL:0, N:0});
     const s = settMap.get(w);
     if (lavorato === "S") s.X++;
@@ -171,22 +205,56 @@ function calcSettimane(annoMese, giorni) {
     else if (evento?.codice === "MAL") s.MAL++;
     else s.N++;
   });
-  return [...settMap.entries()].sort((a,b)=>a[0]-b[0]).map(([id,c]) => {
-    let tc = "0";
-    if (c.MAT > 0 && c.X === 0) tc = "1";
-    else if (c.MAL > 0 && c.X > 0) tc = "2";
-    else if (c.X > 0) tc = "X";
-    const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
-    return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
-  });
+
+  const result = [...settMap.entries()]
+    .filter(([id]) => id >= firstWeek && id <= lastWeek)
+    .sort((a,b) => a[0]-b[0])
+    .map(([id, c]) => {
+      let tc = "0";
+      if (c.MAT > 0 && c.X === 0) tc = "1";
+      else if (c.MAL > 0 && c.X > 0) tc = "2";
+      else if (c.X > 0) tc = "X";
+      const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
+      return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
+    });
+
+  // Ensure settimane_lavorate satisfies INPS constraints:
+  // - settimane_lavorate <= GiorniRetribuiti (else 02560E)
+  // - settimane_lavorate * 6 >= GiorniRetribuiti (else 02570E)
+  // - settimane_lavorate > 0 if GiorniRetribuiti > 0 (else 02580E)
+  const giorniRet = parseIt(lav.GiorniRetribuiti);
+  if (giorniRet > 0) {
+    const nLav = result.filter(s => s.TipoCopertura !== "0").length;
+    if (nLav === 0 || nLav * 6 < giorniRet) {
+      // Determine upgrade TC from DifferenzeAccredito events (MAL → TC=2, else TC=X)
+      const daEventi = (lav.DifferenzeAccredito || []).map(d => d.CodiceEvento).filter(Boolean);
+      const upgradeTc = daEventi.includes("MAL") ? "2" : "X";
+      const upgradeCe = upgradeTc === "2" ? "MAL" : null;
+      let count = nLav;
+      for (let i = 0; i < result.length && count * 6 < giorniRet; i++) {
+        if (result[i].TipoCopertura === "0") {
+          result[i] = { ...result[i], TipoCopertura: upgradeTc, CodiceEvento: upgradeCe };
+          count++;
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
-function calcTotDebito(lavs) {
-  return Math.round(lavs.reduce((s,l) => s + (parseIt(l.Contributo)||0), 0));
+function calcTotDebito(lavs, altrePartite = []) {
+  const fromLav = lavs.reduce((s, l) =>
+    s + (parseIt(l.Contributo) || 0) +
+    (l.AltreADebito || []).reduce((ss, ad) => ss + (parseIt(ad.ImportoADebito) || 0), 0), 0);
+  const fromAltrePartite = (altrePartite || []).reduce((s, apd) => s + (parseIt(apd.SommaADebito) || 0), 0);
+  return Math.round(fromLav + fromAltrePartite);
 }
 function calcTotCredito(lavs) {
-  return Math.round(lavs.reduce((s,l) =>
-    s + l.InfoAggCausali.reduce((ss,c) => ss + (parseIt(c.ImportoRif)||0), 0), 0));
+  return Math.round(lavs.reduce((s, l) =>
+    s + l.InfoAggCausali.reduce((ss, c) => ss + (parseIt(c.ImportoRif) || 0), 0) +
+    (l.MisureCompensative || []).reduce((ss, mc) => ss + (parseIt(mc.ImportoMCACred) || 0), 0) +
+    (parseIt(l.IndMat1Fascia) || 0) + (parseIt(l.IndMat2Fascia) || 0), 0));
 }
 function countGiorniLav(giorni) {
   return giorni.filter(g => g.lavorato === "S").length;
@@ -405,7 +473,7 @@ function parsePrivXML(xmlStr) {
           if (meseEl) {
             lav.BaseCalcoloTFR = childTxt(meseEl, "BaseCalcoloTFR");
             lav.BaseCalcoloPrevCompl = childTxt(meseEl, "BaseCalcoloPrevCompl");
-            const mcEls = directChildren(meseEl.querySelector("MisureCompensative") || document.createElement("x"), "MisCompACredito");
+            const mcEls = directChildren(meseEl.querySelector("MisureCompensative"), "MisCompACredito");
             for (const mc of mcEls) {
               lav.MisureCompensative.push({
                 id: uid(),
@@ -516,7 +584,7 @@ function buildPrivXML(cfg, aziende) {
         if (lav.TipoApplCongedoParOre) x += `        <TipoApplCongedoParOre>${esc(lav.TipoApplCongedoParOre)}</TipoApplCongedoParOre>\n`;
         if (lav.TipoRetrMal) x += `        <TipoRetrMal>${esc(lav.TipoRetrMal)}</TipoRetrMal>\n`;
         if (lav.PercPartTime) x += `        <PercPartTime>${esc(lav.PercPartTime)}</PercPartTime>\n`;
-        if (lav.PercPartTimeMese && lav.PercPartTimeMese !== lav.PercPartTime)
+        if (lav.PercPartTimeMese)
           x += `        <PercPartTimeMese>${esc(lav.PercPartTimeMese)}</PercPartTimeMese>\n`;
         x += `        <NumMensilita>${esc(lav.NumMensilita)}</NumMensilita>\n`;
 
@@ -563,7 +631,7 @@ function buildPrivXML(cfg, aziende) {
         if (lav.RetribTeorica) x += `          <RetribTeorica>${esc(lav.RetribTeorica)}</RetribTeorica>\n`;
         if (lav.OreLavorabili) x += `          <OreLavorabili>${esc(lav.OreLavorabili)}</OreLavorabili>\n`;
 
-        const setts = calcSettimane(az.AnnoMese, lav.giorni);
+        const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
         for (const s of setts) {
           x += `          <Settimana>\n`;
           x += `            <IdSettimana>${s.IdSettimana}</IdSettimana>\n`;
@@ -650,7 +718,7 @@ function buildPrivXML(cfg, aziende) {
       }
 
       const nLav = pos.lavoratori.length;
-      const totDeb = calcTotDebito(pos.lavoratori);
+      const totDeb = calcTotDebito(pos.lavoratori, az.AltrePartiteADebito);
       const totCred = calcTotCredito(pos.lavoratori);
       const forza = pos.ForzaAziendale || String(nLav);
       x += `      <DenunciaAziendale>\n`;
@@ -1168,7 +1236,7 @@ function renderCollabForm(az, c, updateCollab) {
 function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav) {
   const upd = (patch) => updateLav(az.id, pos.id, lav.id, patch);
   const ggLav = countGiorniLav(lav.giorni);
-  const setts = calcSettimane(az.AnnoMese, lav.giorni);
+  const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
   const isNR00 = lav.TipoLavStat === "NR00";
 
   return (
