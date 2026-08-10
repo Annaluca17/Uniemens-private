@@ -348,6 +348,20 @@ function checkSettimane(setts, lav) {
   return w;
 }
 
+/* ═══ SCELTA GiorniContribuiti / OreContribuite ═══ */
+/* Sono alternativi nello schema. Il part-time va dichiarato a ore; per gli altri si usano
+   i giorni, ma se il lavoratore ha solo le ore valorizzate si emettono quelle. */
+const isPartTime = (lav) => ["P","V","M"].includes(lav.Qualifica2);
+const usaOreContribuite = (lav) =>
+  !!lav.OreContribuite && (isPartTime(lav) || !lav.GiorniContribuiti);
+
+/* OreContribuite è in centesimi come OrarioContrattuale e PercPartTime: 78 ore = 7800. */
+const oreDaCentesimi = (v) => {
+  const n = parseFloat(String(v ?? "").replace(",", "."));
+  if (!Number.isFinite(n)) return null;
+  return (n / 100).toFixed(2).replace(".", ",");
+};
+
 /* ═══ VALIDAZIONE — quadri obbligatori ═══ */
 /* I codici e i testi ricalcano i messaggi del validatore INPS, così l'avviso che vedi
    qui e la riga del file di verifica si leggono allo stesso modo.
@@ -391,10 +405,19 @@ function validaLav(lav, annoMese) {
     v.push({liv:"E", msg:"00820E — Qualifica2 'F' (full time) non prevede PercPartTime"});
   if (["P","V","M"].includes(lav.Qualifica2) && !lav.PercPartTime)
     v.push({liv:"W", msg:"Qualifica2 part-time senza PercPartTime"});
-  /* 1527 — osservato sul part-time: SPUGNETTI (Q2='P', Contributo valorizzato, OreContribuite
-     assente) viene scartato, mentre lo stesso schema con Q2='F' passa. */
-  if (["P","V","M"].includes(lav.Qualifica2) && lav.Contributo && !lav.OreContribuite)
-    v.push({liv:"E", msg:"1527 — assenza di OreContribuite in presenza di Contributo (obbligatorio sul part-time): compilalo nel tab Retributivi"});
+  /* 1527 — sul part-time la contribuzione si dichiara a ore, non a giorni. */
+  if (isPartTime(lav) && lav.Contributo && !lav.OreContribuite)
+    v.push({liv:"E", msg:"1527 — assenza di OreContribuite in presenza di Contributo (sul part-time è obbligatoria): compilala nel tab Retributivi"});
+  /* Alternativa esclusiva: emetterli entrambi fa scartare il flusso. Meglio dirlo qui
+     che lasciare all'utente il dubbio su quale dei due sia finito nell'XML. */
+  if (lav.OreContribuite && lav.GiorniContribuiti)
+    v.push({liv:"W", msg:`GiorniContribuiti e OreContribuite sono alternativi: nell'XML uscirà solo ${usaOreContribuite(lav) ? "OreContribuite" : "GiorniContribuiti"}`});
+  if (isPartTime(lav) && lav.GiorniContribuiti && !lav.OreContribuite)
+    v.push({liv:"W", msg:"Su un part-time la contribuzione va espressa in OreContribuite, non in GiorniContribuiti"});
+  /* Centesimi: 78 ore si scrivono 7800. Sotto 100 sarebbe meno di un'ora, quasi
+     certamente ore scritte per intero e non convertite. */
+  if (lav.OreContribuite && parseIt(lav.OreContribuite) > 0 && parseIt(lav.OreContribuite) < 100)
+    v.push({liv:"W", msg:`OreContribuite = ${lav.OreContribuite} vale ${oreDaCentesimi(lav.OreContribuite)} ore: il campo è in centesimi, 78 ore si scrivono 7800`});
   if (lav.TipoLavStat !== "NR00" && !lav.Imponibile)
     v.push({liv:"W", msg:"Imponibile non valorizzato"});
   const mancanti = settimaneMancanti(annoMese, lav);
@@ -910,14 +933,17 @@ function buildPrivXML(cfg, aziende) {
           x += `          </DifferenzeAccredito>\n`;
         }
 
-        /* L'ordine è vincolato dalla <sequence> dello schema: OreContribuite sta FRA
-           GiorniRetribuiti e GiorniContribuiti. Emetterla dopo GiorniContribuiti faceva
-           scartare il flusso con "invalid child element 'OreContribuite'".
-           Confermato su 1638 DenunceIndividuali reali accettate da INPS:
-           GiorniRetribuiti > OreContribuite > RispettoMinimale > SettimaneUtili. */
+        /* GiorniRetribuiti va sempre. Poi lo schema prevede una SCELTA — il Documento
+           tecnico INPS dice "Ovvero" — fra GiorniContribuiti e OreContribuite: emetterli
+           entrambi fa scartare il flusso ("invalid child element 'OreContribuite'", perché
+           GiorniContribuiti ha già soddisfatto la scelta).
+           Sul part-time si usa OreContribuite (ore per cui è stata versata contribuzione). */
         if (lav.GiorniRetribuiti) x += `          <GiorniRetribuiti>${esc(lav.GiorniRetribuiti)}</GiorniRetribuiti>\n`;
-        if (lav.OreContribuite) x += `          <OreContribuite>${esc(lav.OreContribuite)}</OreContribuite>\n`;
-        if (lav.GiorniContribuiti) x += `          <GiorniContribuiti>${esc(lav.GiorniContribuiti)}</GiorniContribuiti>\n`;
+        if (usaOreContribuite(lav)) {
+          x += `          <OreContribuite>${esc(lav.OreContribuite)}</OreContribuite>\n`;
+        } else if (lav.GiorniContribuiti) {
+          x += `          <GiorniContribuiti>${esc(lav.GiorniContribuiti)}</GiorniContribuiti>\n`;
+        }
         if (lav.RispettoMinimale) x += `          <RispettoMinimale>${esc(lav.RispettoMinimale)}</RispettoMinimale>\n`;
         if (lav.SettimaneUtili) x += `          <SettimaneUtili>${esc(lav.SettimaneUtili)}</SettimaneUtili>\n`;
 
@@ -1685,13 +1711,21 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
             )}
             <div style={C.row}>
               <F label="Ore Lavorabili" value={lav.OreLavorabili} onChange={v=>upd({OreLavorabili:v})} w="120px"/>
-              <F label="Ore Contribuite" value={lav.OreContribuite} onChange={v=>upd({OreContribuite:v})} w="120px"/>
+              {/* In centesimi come OrarioContrattuale: la nota mostra il valore in chiaro. */}
+              <F label="Ore Contribuite" value={lav.OreContribuite} onChange={v=>upd({OreContribuite:v})} w="120px"
+                 ph="es. 7800=78h" note={lav.OreContribuite ? `= ${oreDaCentesimi(lav.OreContribuite)} ore` : ""}/>
               <F label="Settimane Utili" value={lav.SettimaneUtili} onChange={v=>upd({SettimaneUtili:v})} w="120px"/>
             </div>
             <div style={C.row}>
               <F label="Giorni Retribuiti" value={lav.GiorniRetribuiti} onChange={v=>upd({GiorniRetribuiti:v})} w="120px" note={`auto: ${ggLav}`}/>
-              <F label="Giorni Contribuiti" value={lav.GiorniContribuiti} onChange={v=>upd({GiorniContribuiti:v})} w="120px"/>
+              <F label="Giorni Contribuiti" value={lav.GiorniContribuiti} onChange={v=>upd({GiorniContribuiti:v})} w="120px"
+                 note={usaOreContribuite(lav) ? "escluso dall'XML" : ""}/>
               <F label="Rispetto Minimale" value={lav.RispettoMinimale} onChange={v=>upd({RispettoMinimale:v})} opts={SI_NO} w="120px"/>
+            </div>
+            <div style={{fontSize:"11px",color:"#6A7282",marginTop:"-4px",marginBottom:"9px",lineHeight:"1.5"}}>
+              <code>GiorniRetribuiti</code> va sempre indicato. <code>GiorniContribuiti</code> e <code>OreContribuite</code> sono
+              invece <b>alternativi</b>: nell'XML ne esce uno solo. Sul part-time va usato <code>OreContribuite</code>,
+              espresso in centesimi (78 ore = <code>7800</code>).
             </div>
             <div style={C.row}>
               <F label="Base Calcolo TFR" value={lav.BaseCalcoloTFR} onChange={v=>upd({BaseCalcoloTFR:v})} w="160px"/>
