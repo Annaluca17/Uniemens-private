@@ -5,6 +5,25 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const parseIt = (v) => { const n = parseFloat(String(v||"0").replace(",",".")); return isNaN(n)?0:n; };
 const esc = (s) => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
+/* Tipi importo dello schema UniEmens, come li riporta il validatore INPS:
+   - 'Importo'       → intero puro. "La stringa '1195,58' non è un valore intero valido".
+   - 'ImportoConDec' → decimali con la VIRGOLA. '19.25' fa fallire il Pattern, '19,25' passa.
+   Un valore non numerico viene lasciato intatto: meglio farlo scartare dal validatore
+   che emettere uno 0 inventato al posto di quello che l'utente ha scritto. */
+const impInt = (v) => {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const n = parseFloat(s.replace(",", "."));
+  return Number.isFinite(n) ? String(Math.round(n)) : s;
+};
+const impDec = (v) => {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  return s.includes(",") ? s : s.replace(".", ",");
+};
+/* TipoCodiceContratto è a lunghezza fissa 2: "2" viene scartato, "02" no. */
+const cod2 = (v) => { const s = String(v ?? "").trim(); return s.length === 1 ? "0" + s : s; };
+
 function giorniMese(annoMese) {
   if (!annoMese) return 30;
   const [y, m] = annoMese.split("-").map(Number);
@@ -16,7 +35,7 @@ function giorniMese(annoMese) {
 const TIPO_Q1=[{v:"1",l:"1 – Operaio"},{v:"2",l:"2 – Impiegato"},{v:"5",l:"5 – Apprendista"}];
 const TIPO_Q2=[{v:"F",l:"F – Full time"},{v:"P",l:"P – Part-time orizz."},{v:"V",l:"V – Part-time vert."},{v:"M",l:"M – Part-time misto"}];
 const TIPO_Q3=[{v:"D",l:"D – Dipendente"},{v:"I",l:"I – Intermittente"}];
-const TIPO_CONTRIB=[{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"}];
+const TIPO_CONTRIB=[{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"},{v:"71",l:"71"}];
 const TIPO_LAV=[{v:"00",l:"00 – Standard"},{v:"PB",l:"PB – Borsa lavoro"}];
 const TIPO_LAVSTAT=[{v:"",l:"— standard"},{v:"NR00",l:"NR00 – Non retribuito"},{v:"NFOR",l:"NFOR – Non formale"}];
 const TIPO_PAGA=[{v:"H",l:"H – Orario"},{v:"M",l:"M – Mensile"}];
@@ -157,8 +176,8 @@ const C = {
 
 /* ═══ FIELD ═══ */
 function F({ label, value, onChange, ph="", w="140px", full=false, opts=null, type="text", note="", disabled=false }) {
-  /* Un valore importato non previsto in lista (es. TipoContribuzione 71) veniva mostrato
-     come la prima opzione: il select sembrava dire una cosa e lo stato ne conteneva un'altra.
+  /* Un valore importato non previsto in lista veniva mostrato come la prima opzione:
+     il select sembrava dire una cosa e lo stato ne conteneva un'altra.
      Ora l'opzione viene aggiunta al volo e marcata. */
   let options = opts;
   if (opts && value && !opts.some(o => o.v === value)) {
@@ -591,12 +610,15 @@ function parsePrivXML(xmlStr) {
 }
 
 /* ═══ BUILDER XML ═══ */
-/* TipoRegolarizz valorizzato → si emette la coppia di attributi, con IdentInvioAttoINPS
-   presente anche se vuoto (come nel tracciato di riferimento). */
-const regolarizzAttr = (o) =>
-  o.TipoRegolarizz
-    ? ` TipoRegolarizz="${esc(o.TipoRegolarizz)}" IdentInvioAttoINPS="${esc(o.IdentInvioAttoINPS)}"`
-    : "";
+/* TipoRegolarizz valorizzato → si emette l'attributo. IdentInvioAttoINPS si emette solo
+   se ha un valore: sullo schema INPS è di tipo 'String' con un Pattern che la stringa
+   vuota non soddisfa, e IdentInvioAttoINPS="" faceva scartare l'intero flusso. */
+const regolarizzAttr = (o) => {
+  if (!o.TipoRegolarizz) return "";
+  let a = ` TipoRegolarizz="${esc(o.TipoRegolarizz)}"`;
+  if (o.IdentInvioAttoINPS) a += ` IdentInvioAttoINPS="${esc(o.IdentInvioAttoINPS)}"`;
+  return a;
+};
 
 function buildPrivXML(cfg, aziende) {
   let x = `<?xml version="1.0" encoding="UTF-8"?>\n<DenunceMensili>\n`;
@@ -641,7 +663,7 @@ function buildPrivXML(cfg, aziende) {
         if (lav.UnitaProduttiva) x += `        <UnitaProduttiva>${esc(lav.UnitaProduttiva)}</UnitaProduttiva>\n`;
         if (lav.CodiceComune) x += `        <CodiceComune>${esc(lav.CodiceComune)}</CodiceComune>\n`;
         if (lav.CodiceContratto) x += `        <CodiceContratto>${esc(lav.CodiceContratto)}</CodiceContratto>\n`;
-        if (lav.TipoCodiceContratto) x += `        <TipoCodiceContratto>${esc(lav.TipoCodiceContratto)}</TipoCodiceContratto>\n`;
+        if (lav.TipoCodiceContratto) x += `        <TipoCodiceContratto>${esc(cod2(lav.TipoCodiceContratto))}</TipoCodiceContratto>\n`;
         if (lav.QualProf) x += `        <QualProf>${esc(lav.QualProf)}</QualProf>\n`;
         if (lav.TipoPaga) x += `        <TipoPaga>${esc(lav.TipoPaga)}</TipoPaga>\n`;
         if (lav.DivisoreOrarioContr) x += `        <DivisoreOrarioContr>${esc(lav.DivisoreOrarioContr)}</DivisoreOrarioContr>\n`;
@@ -680,8 +702,8 @@ function buildPrivXML(cfg, aziende) {
         }
 
         if (lav.TipoLavStat !== "NR00") {
-          if (lav.Imponibile) x += `          <Imponibile>${esc(lav.Imponibile)}</Imponibile>\n`;
-          if (lav.Contributo) x += `          <Contributo>${esc(lav.Contributo)}</Contributo>\n`;
+          if (lav.Imponibile) x += `          <Imponibile>${esc(impInt(lav.Imponibile))}</Imponibile>\n`;
+          if (lav.Contributo) x += `          <Contributo>${esc(impDec(lav.Contributo))}</Contributo>\n`;
         }
 
         for (const ad of lav.AltreADebito) {
@@ -696,7 +718,7 @@ function buildPrivXML(cfg, aziende) {
           x += `          </AltreADebito>\n`;
         }
 
-        if (lav.RetribTeorica) x += `          <RetribTeorica>${esc(lav.RetribTeorica)}</RetribTeorica>\n`;
+        if (lav.RetribTeorica) x += `          <RetribTeorica>${esc(impInt(lav.RetribTeorica))}</RetribTeorica>\n`;
         if (lav.OreLavorabili) x += `          <OreLavorabili>${esc(lav.OreLavorabili)}</OreLavorabili>\n`;
 
         // Alcune ricostruzioni (denunce a zero, regolarizzazioni) non prevedono <Settimana>:
@@ -925,7 +947,8 @@ export default function UniEmensPriv() {
   const addAzienda = () => {
     const a = mkAzienda();
     setAziende(arr => [...arr, a]);
-    setXAz(a.id); setXPos(a.poss[0].id); setXLav(null); setXCollab(null);
+    // Su un'azienda nuova la prima cosa da compilare è l'Anno-Mese: apri il suo pannello.
+    setXAz(a.id); setXPos(null); setXLav(null); setXCollab(null);
   };
   const removeAzienda = (id) => {
     if (!confirm("Eliminare l'azienda e tutti i suoi dati?")) return;
@@ -948,7 +971,8 @@ export default function UniEmensPriv() {
     setAziende(arr => arr.map(a => a.id!==azId ? a : {
       ...a, poss: a.poss.map(p => p.id===posId ? {...p, lavoratori:[...p.lavoratori, l]} : p)
     }));
-    setXLav(l.id);
+    // selLav si risolve dentro selPos: senza aprire la matricola il nuovo lavoratore non si vedrebbe.
+    setXPos(posId); setXLav(l.id);
   };
   const removeLav = (azId, posId, lavId) => {
     if (!confirm("Eliminare il lavoratore?")) return;
@@ -1024,8 +1048,9 @@ export default function UniEmensPriv() {
     setImportPending(null);
     setImportReport(report);
     if (newAz.length > 0) {
+      // Dopo un import il passo tipico è ricalibrare l'Anno-Mese: apri il pannello azienda.
       setXAz(newAz[0].id);
-      setXPos(newAz[0].poss[0]?.id || null);
+      setXPos(null);
       setXLav(null); setXCollab(null);
     }
   };
@@ -1062,7 +1087,9 @@ export default function UniEmensPriv() {
       <div style={C.toolbar}>
         <button style={C.btn("p")} onClick={addAzienda}>+ Azienda</button>
         <button style={C.btn("d")} onClick={()=> selAz && addPos(selAz.id)} disabled={!selAz}>+ Matricola</button>
-        <button style={C.btn("d")} onClick={()=> selPos && addLav(selAz.id, selPos.id)} disabled={!selPos}>+ Lavoratore</button>
+        {/* Con l'azienda selezionata ma nessuna matricola aperta si ricade sulla prima:
+            il pulsante resterebbe altrimenti spento nel caso più comune (una sola matricola). */}
+        <button style={C.btn("d")} onClick={()=>{ const p = selPos || selAz?.poss[0]; if (p) addLav(selAz.id, p.id); }} disabled={!selAz?.poss.length}>+ Lavoratore</button>
         <button style={C.btn("d")} onClick={()=> selAz && addCollab(selAz.id)} disabled={!selAz}>+ Collab.</button>
         <div style={{flex:1}}/>
         <button style={C.btn("i")} onClick={()=> fileRef.current?.click()}>Importa XML</button>
@@ -1088,7 +1115,9 @@ export default function UniEmensPriv() {
             const isAct = xAz === a.id;
             return (
               <div key={a.id} style={{marginBottom:"4px"}}>
-                <div style={C.itemRow(isAct)} onClick={()=>{ setXAz(a.id); setXPos(a.poss[0]?.id || null); setXLav(null); setXCollab(null); }}>
+                {/* Selezionare l'azienda deve aprire il pannello azienda, non quello della prima
+                    matricola: selPos ha la precedenza nel render e l'Anno-Mese restava irraggiungibile. */}
+                <div style={C.itemRow(isAct)} onClick={()=>{ setXAz(a.id); setXPos(null); setXLav(null); setXCollab(null); }}>
                   <div style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
                     <div style={{fontWeight:"600", fontSize:"12px"}}>{a.RagSocAzienda || a.CFAzienda || "(nuova azienda)"}</div>
                     <div style={{fontSize:"10px", color:"#6A7282"}}>{a.AnnoMese || "—"} · {nLav} lav · €{totDeb}</div>
@@ -1247,6 +1276,14 @@ function renderAzForm(az, setAnnoMese, updateAz) {
         <div style={{fontSize:"11px",color:"#6A7282",marginTop:"6px"}}>
           {nLav} lavoratori · {az.poss.length} posizioni contributive · {az.collaboratori.length} collaboratori
         </div>
+        {/* Cambiando mese i giorni vengono ridimensionati ma conservano gli stati precedenti:
+            l'allineamento ai giorni della settimana cambia, il calendario va rivisto. */}
+        <div style={{fontSize:"11px",color:"#92400E",marginTop:"6px",lineHeight:"1.5"}}>
+          Cambiando Anno-Mese l'anagrafica dei lavoratori resta intatta e il calendario viene
+          adattato alla lunghezza del nuovo mese, ma gli stati dei giorni restano quelli del mese
+          precedente e non sono più allineati ai giorni della settimana: rientra nel tab
+          <b> Giorni</b> di ogni lavoratore e ripremi <b>Compila Lun–Ven</b>.
+        </div>
       </div>
 
       <div style={C.sec}>
@@ -1398,7 +1435,8 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
             </div>
             <div style={C.row}>
               <F label="Codice Contratto" value={lav.CodiceContratto} onChange={v=>upd({CodiceContratto:v})} w="120px"/>
-              <F label="Tipo Cod. Contratto" value={lav.TipoCodiceContratto} onChange={v=>upd({TipoCodiceContratto:v})} w="120px"/>
+              <F label="Tipo Cod. Contratto" value={lav.TipoCodiceContratto} onChange={v=>upd({TipoCodiceContratto:v})} w="120px"
+                 note={cod2(lav.TipoCodiceContratto) !== String(lav.TipoCodiceContratto||"").trim() ? `XML: ${cod2(lav.TipoCodiceContratto)}` : ""}/>
               <F label="QualProf (ISTAT)" value={lav.QualProf} onChange={v=>upd({QualProf:v})} ph="5.2.2.4.0" w="160px"/>
             </div>
             <div style={C.row}>
@@ -1445,9 +1483,14 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
             </div>
             {!isNR00 && (
               <div style={C.row}>
-                <F label="Imponibile" value={lav.Imponibile} onChange={v=>upd({Imponibile:v})} w="140px"/>
-                <F label="Contributo" value={lav.Contributo} onChange={v=>upd({Contributo:v})} w="140px"/>
-                <F label="Retrib. Teorica" value={lav.RetribTeorica} onChange={v=>upd({RetribTeorica:v})} w="140px"/>
+                {/* L'arrotondamento a intero cambia un importo dichiarato: va mostrato,
+                    non fatto di nascosto in fase di export. */}
+                <F label="Imponibile" value={lav.Imponibile} onChange={v=>upd({Imponibile:v})} w="140px"
+                   note={impInt(lav.Imponibile) !== String(lav.Imponibile||"").trim() ? `XML: ${impInt(lav.Imponibile)}` : ""}/>
+                <F label="Contributo" value={lav.Contributo} onChange={v=>upd({Contributo:v})} w="140px"
+                   note={impDec(lav.Contributo) !== String(lav.Contributo||"").trim() ? `XML: ${impDec(lav.Contributo)}` : ""}/>
+                <F label="Retrib. Teorica" value={lav.RetribTeorica} onChange={v=>upd({RetribTeorica:v})} w="140px"
+                   note={impInt(lav.RetribTeorica) !== String(lav.RetribTeorica||"").trim() ? `XML: ${impInt(lav.RetribTeorica)}` : ""}/>
               </div>
             )}
             <div style={C.row}>
