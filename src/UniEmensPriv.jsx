@@ -1,11 +1,9 @@
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef } from "react";
 
 /* ═══ UTILITIES ═══ */
 const uid = () => Math.random().toString(36).slice(2, 9);
-const toIt = (v) => { const n = parseFloat(String(v||"0").replace(",",".")); return isNaN(n)?"0,00":n.toFixed(2).replace(".",","); };
 const parseIt = (v) => { const n = parseFloat(String(v||"0").replace(",",".")); return isNaN(n)?0:n; };
 const esc = (s) => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-const round2 = (v) => Math.round(v*100)/100;
 
 function giorniMese(annoMese) {
   if (!annoMese) return 30;
@@ -42,6 +40,8 @@ const mkGiorni = (n) => Array.from({length:n}, (_,i) => ({
 
 const mkLav = (annoMese="") => ({
   id: uid(), CFLavoratore:"", Cognome:"", Nome:"",
+  EmailLav:"", CellLav:"",
+  TipoRegolarizz:"", IdentInvioAttoINPS:"",
   Qualifica1:"1", Qualifica2:"F", Qualifica3:"D",
   TipoContribuzione:"00", RegimePost95:"N",
   Cittadinanza:"000", UnitaOperativa:"0", UnitaProduttiva:"0",
@@ -59,6 +59,7 @@ const mkLav = (annoMese="") => ({
   Imponibile:"", Contributo:"",
   AltreADebito:[], RetribTeorica:"", OreLavorabili:"",
   giorni: mkGiorni(giorniMese(annoMese)||30),
+  EmettiSettimane: true, AdeguaSettimane: true,
   GiorniRetribuiti:"", GiorniContribuiti:"", OreContribuite:"",
   RispettoMinimale:"S", SettimaneUtili:"",
   InfoAggCausali:[], DatiParticolari:[],
@@ -72,7 +73,14 @@ const mkLav = (annoMese="") => ({
   MisureCompensative:[],
 });
 
-const mkPos = () => ({ id: uid(), Matricola:"", lavoratori: [], TrattQuotaLav:"S", ForzaAziendale:"" });
+/* AltrePartiteADebito sta dentro DenunciaAziendale → appartiene alla PosContributiva,
+   non all'azienda: tenerla sull'azienda la duplicava su ogni matricola. */
+const mkPos = () => ({
+  id: uid(), Matricola:"", lavoratori: [],
+  TrattQuotaLav:"S", ForzaAziendale:"",
+  TipoRegolarizz:"", IdentInvioAttoINPS:"",
+  AltrePartiteADebito:[],
+});
 const mkCollab = () => ({
   id: uid(), CFCollaboratore:"", Cognome:"", Nome:"",
   CodiceComune:"", TipoRapporto:"1E",
@@ -82,7 +90,6 @@ const mkCollab = () => ({
 const mkAzienda = () => ({
   id: uid(), AnnoMese:"", CFAzienda:"", RagSocAzienda:"",
   poss: [mkPos()], collaboratori: [], CAP:"", ISTAT:"",
-  AltrePartiteADebito:[],
 });
 const EMPTY_CFG = {
   TipoMittente:"1", CFPersonaMittente:"", RagSocMittente:"",
@@ -137,11 +144,18 @@ const C = {
 
 /* ═══ FIELD ═══ */
 function F({ label, value, onChange, ph="", w="140px", full=false, opts=null, type="text", note="", disabled=false }) {
+  /* Un valore importato non previsto in lista (es. TipoContribuzione 71) veniva mostrato
+     come la prima opzione: il select sembrava dire una cosa e lo stato ne conteneva un'altra.
+     Ora l'opzione viene aggiunta al volo e marcata. */
+  let options = opts;
+  if (opts && value && !opts.some(o => o.v === value)) {
+    options = [...opts, { v: value, l: `${value} — da file` }];
+  }
   return (
     <div style={{ display:"flex", flexDirection:"column", flex: full?"1 1 100%":`1 1 ${w}`, minWidth: full?"180px":w }}>
       <label style={C.lbl}>{label}{note&&<span style={{color:"#059669",marginLeft:"5px",fontWeight:"700",fontSize:"9px"}}>{note}</span>}</label>
-      {opts
-        ? <select style={{...C.sel, opacity:disabled?0.5:1}} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)}>{opts.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+      {options
+        ? <select style={{...C.sel, opacity:disabled?0.5:1}} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
         : <input type={type} style={{...C.inp, opacity:disabled?0.5:1}} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)} placeholder={ph}/>}
     </div>
   );
@@ -181,56 +195,53 @@ function calcSettimane(annoMese, giorni, lav = {}) {
   const [y, m] = annoMese.split("-").map(Number);
   if (!y || !m) return [];
 
-  // Employment period within the month (assunzione/cessazione)
+  // Periodo di rapporto nel mese (assunzione/cessazione)
   const nDays = giorniMese(annoMese);
   const firstDay = lav.hasAssunzione ? Math.max(1, parseInt(lav.GiornoAssunzione) || 1) : 1;
   const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
-  const firstWeek = isoWeekForDay(new Date(y, m-1, firstDay));
-  const lastWeek  = isoWeekForDay(new Date(y, m-1, lastDay));
-
-  // Worker has retribution even if individual days are not marked as lavorato=S
-  const hasRetribuzione = parseIt(lav.GiorniRetribuiti) > 0 || parseIt(lav.Contributo) > 0;
 
   const settMap = new Map();
   giorni.forEach(({gg, lavorato, evento}) => {
+    // Il periodo di rapporto si filtra sui giorni: il vecchio confronto fra numeri di
+    // settimana ISO svuotava l'intero elenco quando il mese scavalca l'anno.
+    if (gg < firstDay || gg > lastDay) return;
     const d = new Date(y, m-1, gg);
-    // Week belongs to month if its effective Monday (Sun→next Mon) is in the month
+    // La settimana appartiene al mese se il suo lunedì effettivo (dom → lun successivo) ci cade dentro
     const mon = weekEffectiveMonday(d);
     if (mon.getMonth() + 1 !== m || mon.getFullYear() !== y) return;
     const w = isoWeekForDay(d);
-    if (!settMap.has(w)) settMap.set(w, {X:0, MAT:0, MAL:0, N:0});
+    if (!settMap.has(w)) settMap.set(w, {ord: mon.getTime(), tot:0, X:0, MAT:0, MAL:0});
     const s = settMap.get(w);
+    s.tot++;
     if (lavorato === "S") s.X++;
     else if (evento?.codice === "MA1") s.MAT++;
     else if (evento?.codice === "MAL") s.MAL++;
-    else s.N++;
   });
 
   const result = [...settMap.entries()]
-    .filter(([id]) => id >= firstWeek && id <= lastWeek)
-    .sort((a,b) => a[0]-b[0])
+    // Ordine cronologico via lunedì della settimana: i numeri ISO si azzerano a fine anno
+    // e ordinarli/filtrarli come interi svuotava dicembre e gennaio.
+    .sort((a,b) => a[1].ord - b[1].ord)
     .map(([id, c]) => {
+      const ev = c.MAT + c.MAL;
+      const codEv = ev === 0 ? null : (c.MAT >= c.MAL ? "MA1" : "MAL");
       let tc = "0";
-      if (c.MAT > 0 && c.X === 0) tc = "1";
-      else if (c.MAL > 0 && c.X > 0) tc = "2";
-      else if (c.X > 0) tc = "X";
-      const codEv = (tc === "1") ? "MA1" : (tc === "2") ? "MAL" : null;
-      return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: codEv };
+      if (ev > 0 && ev === c.tot) tc = "1";   // tutti i giorni della settimana coperti da evento
+      else if (ev > 0) tc = "2";              // evento su parte della settimana
+      else if (c.X > 0) tc = "X";             // lavorata, nessun evento
+      return { IdSettimana: id, TipoCopertura: tc, CodiceEvento: (tc === "1" || tc === "2") ? codEv : null };
     });
 
-  // Ensure settimane_lavorate satisfies INPS constraints:
-  // - settimane_lavorate <= GiorniRetribuiti (else 02560E)
-  // - settimane_lavorate * 6 >= GiorniRetribuiti (else 02570E)
-  // - settimane_lavorate > 0 if GiorniRetribuiti > 0 (else 02580E)
+  // Adeguamento opzionale a GiorniRetribuiti (vincolo 02570E). Promuove settimane scoperte:
+  // è una forzatura, quindi disattivabile per lavoratore.
   const giorniRet = parseIt(lav.GiorniRetribuiti);
-  if (giorniRet > 0) {
-    const nLav = result.filter(s => s.TipoCopertura !== "0").length;
-    if (nLav === 0 || nLav * 6 < giorniRet) {
-      // Determine upgrade TC from DifferenzeAccredito events (MAL → TC=2, else TC=X)
+  if (giorniRet > 0 && lav.AdeguaSettimane !== false) {
+    const nCop = result.filter(s => s.TipoCopertura !== "0").length;
+    if (nCop * 6 < giorniRet) {
       const daEventi = (lav.DifferenzeAccredito || []).map(d => d.CodiceEvento).filter(Boolean);
       const upgradeTc = daEventi.includes("MAL") ? "2" : "X";
       const upgradeCe = upgradeTc === "2" ? "MAL" : null;
-      let count = nLav;
+      let count = nCop;
       for (let i = 0; i < result.length && count * 6 < giorniRet; i++) {
         if (result[i].TipoCopertura === "0") {
           result[i] = { ...result[i], TipoCopertura: upgradeTc, CodiceEvento: upgradeCe };
@@ -241,6 +252,17 @@ function calcSettimane(annoMese, giorni, lav = {}) {
   }
 
   return result;
+}
+
+/* Vincoli INPS su settimane / giorni retribuiti: segnalati, non nascosti. */
+function checkSettimane(setts, lav) {
+  const gr = parseIt(lav.GiorniRetribuiti);
+  const n = setts.filter(s => s.TipoCopertura !== "0").length;
+  const w = [];
+  if (gr > 0 && n === 0) w.push("02580E — GiorniRetribuiti > 0 ma nessuna settimana coperta");
+  if (gr > 0 && n > gr)  w.push(`02560E — settimane coperte (${n}) maggiori dei GiorniRetribuiti (${gr})`);
+  if (gr > 0 && n > 0 && n * 6 < gr) w.push(`02570E — settimane coperte (${n}) × 6 minori dei GiorniRetribuiti (${gr})`);
+  return w;
 }
 
 function calcTotDebito(lavs, altrePartite = []) {
@@ -284,7 +306,7 @@ function parsePrivXML(xmlStr) {
   const denunce = root.tagName === "DenunceMensili" ? root : root.querySelector("DenunceMensili");
   if (!denunce) throw new Error("Sezione DenunceMensili non trovata");
 
-  const report = { aziende:0, posizioni:0, lavoratori:0, collaboratori:0, eventi:0, warnings:[], ignored:[] };
+  const report = { aziende:0, posizioni:0, lavoratori:0, collaboratori:0, eventi:0, regolarizz:0, warnings:[], ignored:[] };
 
   /* ── DatiMittente ── */
   const dmEl = denunce.querySelector("DatiMittente");
@@ -319,9 +341,11 @@ function parsePrivXML(xmlStr) {
       if (denAzEl) {
         pos.TrattQuotaLav = childTxt(denAzEl, "TrattQuotaLav") || "S";
         pos.ForzaAziendale = childTxt(denAzEl, "ForzaAziendale") || "";
+        pos.TipoRegolarizz = denAzEl.getAttribute("TipoRegolarizz") || "";
+        pos.IdentInvioAttoINPS = denAzEl.getAttribute("IdentInvioAttoINPS") || "";
         const apdEls = directChildren(denAzEl, "AltrePartiteADebito");
         for (const apd of apdEls) {
-          az.AltrePartiteADebito.push({
+          pos.AltrePartiteADebito.push({
             id: uid(),
             CausaleADebito: childTxt(apd, "CausaleADebito"),
             NumDip: childTxt(apd, "NumDip"),
@@ -336,48 +360,55 @@ function parsePrivXML(xmlStr) {
       for (const diEl of diEls) {
         const lav = mkLav(az.AnnoMese);
         lav.id = uid();
+        /* Import fedele: un campo assente nel file resta vuoto. Applicare i default
+           (|| "1", || "02"…) riscriveva dati che nell'originale non c'erano. */
+        lav.TipoRegolarizz = diEl.getAttribute("TipoRegolarizz") || "";
+        lav.IdentInvioAttoINPS = diEl.getAttribute("IdentInvioAttoINPS") || "";
         lav.CFLavoratore = childTxt(diEl, "CFLavoratore");
         lav.Cognome = childTxt(diEl, "Cognome");
         lav.Nome = childTxt(diEl, "Nome");
-        lav.Qualifica1 = childTxt(diEl, "Qualifica1") || "1";
-        lav.Qualifica2 = childTxt(diEl, "Qualifica2") || "F";
-        lav.Qualifica3 = childTxt(diEl, "Qualifica3") || "D";
-        lav.TipoContribuzione = childTxt(diEl, "TipoContribuzione") || "00";
-        lav.RegimePost95 = childTxt(diEl, "RegimePost95") || "N";
-        lav.Cittadinanza = childTxt(diEl, "Cittadinanza") || "000";
-        lav.UnitaOperativa = childTxt(diEl, "UnitaOperativa") || "0";
-        lav.UnitaProduttiva = childTxt(diEl, "UnitaProduttiva") || "0";
+        const recEl = diEl.querySelector(":scope > RecapitiLav");
+        lav.EmailLav = childTxt(recEl, "EmailLav");
+        lav.CellLav = childTxt(recEl, "CellLav");
+        lav.Qualifica1 = childTxt(diEl, "Qualifica1");
+        lav.Qualifica2 = childTxt(diEl, "Qualifica2");
+        lav.Qualifica3 = childTxt(diEl, "Qualifica3");
+        lav.TipoContribuzione = childTxt(diEl, "TipoContribuzione");
+        lav.RegimePost95 = childTxt(diEl, "RegimePost95");
+        lav.Cittadinanza = childTxt(diEl, "Cittadinanza");
+        lav.UnitaOperativa = childTxt(diEl, "UnitaOperativa");
+        lav.UnitaProduttiva = childTxt(diEl, "UnitaProduttiva");
         lav.CodiceComune = childTxt(diEl, "CodiceComune");
         lav.CodiceContratto = childTxt(diEl, "CodiceContratto");
-        lav.TipoCodiceContratto = childTxt(diEl, "TipoCodiceContratto") || "02";
+        lav.TipoCodiceContratto = childTxt(diEl, "TipoCodiceContratto");
         lav.QualProf = childTxt(diEl, "QualProf");
-        lav.TipoPaga = childTxt(diEl, "TipoPaga") || "H";
+        lav.TipoPaga = childTxt(diEl, "TipoPaga");
         lav.DivisoreOrarioContr = childTxt(diEl, "DivisoreOrarioContr");
-        lav.OrarioContrattuale = childTxt(diEl, "OrarioContrattuale") || "4000";
-        lav.OrarioGiornMedioContrattuale = childTxt(diEl, "OrarioGiornMedioContrattuale") || "800";
+        lav.OrarioContrattuale = childTxt(diEl, "OrarioContrattuale");
+        lav.OrarioGiornMedioContrattuale = childTxt(diEl, "OrarioGiornMedioContrattuale");
         lav.TipoApplCongedoParOre = childTxt(diEl, "TipoApplCongedoParOre");
-        lav.TipoRetrMal = childTxt(diEl, "TipoRetrMal") || "1";
+        lav.TipoRetrMal = childTxt(diEl, "TipoRetrMal");
         lav.PercPartTime = childTxt(diEl, "PercPartTime");
         lav.PercPartTimeMese = childTxt(diEl, "PercPartTimeMese");
-        lav.NumMensilita = childTxt(diEl, "NumMensilita") || "14000";
+        lav.NumMensilita = childTxt(diEl, "NumMensilita");
 
         const cessEl = diEl.querySelector(":scope > Cessazione");
         if (cessEl) {
           lav.hasCessazione = true;
           lav.GiornoCessazione = childTxt(cessEl, "GiornoCessazione");
-          lav.TipoCessazione = childTxt(cessEl, "TipoCessazione") || "1C";
+          lav.TipoCessazione = childTxt(cessEl, "TipoCessazione");
         }
         const assEl = diEl.querySelector(":scope > Assunzione");
         if (assEl) {
           lav.hasAssunzione = true;
           lav.GiornoAssunzione = childTxt(assEl, "GiornoAssunzione");
-          lav.TipoAssunzione = childTxt(assEl, "TipoAssunzione") || "1";
+          lav.TipoAssunzione = childTxt(assEl, "TipoAssunzione");
         }
 
         const drEl = diEl.querySelector(":scope > DatiRetributivi");
         if (drEl) {
           lav.ForzImpZero = drEl.getAttribute("ForzImpZero") === "S";
-          lav.TipoLavoratore = childTxt(drEl, "TipoLavoratore") || "00";
+          lav.TipoLavoratore = childTxt(drEl, "TipoLavoratore");
           lav.TipoLavStat = childTxt(drEl, "TipoLavStat");
           lav.Imponibile = childTxt(drEl, "Imponibile");
           lav.Contributo = childTxt(drEl, "Contributo");
@@ -386,8 +417,10 @@ function parsePrivXML(xmlStr) {
           lav.GiorniRetribuiti = childTxt(drEl, "GiorniRetribuiti");
           lav.GiorniContribuiti = childTxt(drEl, "GiorniContribuiti");
           lav.OreContribuite = childTxt(drEl, "OreContribuite");
-          lav.RispettoMinimale = childTxt(drEl, "RispettoMinimale") || "S";
+          lav.RispettoMinimale = childTxt(drEl, "RispettoMinimale");
           lav.SettimaneUtili = childTxt(drEl, "SettimaneUtili");
+          // Se il file non dichiara settimane non gliene inventiamo in riesportazione
+          lav.EmettiSettimane = directChildren(drEl, "Settimana").length > 0;
 
           const matEl = drEl.querySelector(":scope > Maternita > MatACredito");
           if (matEl) {
@@ -432,10 +465,15 @@ function parsePrivXML(xmlStr) {
 
           const daEls = directChildren(drEl, "DifferenzeAccredito");
           for (const da of daEls) {
+            const infoEl = da.querySelector(":scope > InfoEvento");
+            const motEl = infoEl?.querySelector("MotivoEvento");
             lav.DifferenzeAccredito.push({
               id: uid(),
               CodiceEvento: childTxt(da, "CodiceEvento"),
               DiffAccredito: childTxt(da, "DiffAccredito"),
+              TipoMotivoEvento: motEl?.getAttribute("TipoMotivoEvento") || "",
+              MotivoEvento: motEl?.textContent?.trim() || "",
+              DiffAccreditoEvento: infoEl ? childTxt(infoEl, "DiffAccreditoEvento") : "",
             });
           }
 
@@ -485,7 +523,7 @@ function parsePrivXML(xmlStr) {
           const dtfrEl = tfrEl.querySelector(":scope > DestinazioneTFR");
           if (dtfrEl) {
             lav.hasDestinazioneTFR = true;
-            lav.DestTFR_TipoScelta = childTxt(dtfrEl, "TipoScelta") || "T2";
+            lav.DestTFR_TipoScelta = childTxt(dtfrEl, "TipoScelta");
             lav.DestTFR_DataScelta = childTxt(dtfrEl, "DataScelta");
             const profEl = dtfrEl.querySelector("ProfiloLav");
             if (profEl) {
@@ -499,10 +537,12 @@ function parsePrivXML(xmlStr) {
 
         pos.lavoratori.push(lav);
         report.lavoratori++;
+        if (lav.TipoRegolarizz) report.regolarizz++;
       }
 
       az.poss.push(pos);
       report.posizioni++;
+      if (pos.TipoRegolarizz) report.regolarizz++;
     }
 
     const lcEl = azEl.querySelector(":scope > ListaCollaboratori");
@@ -538,6 +578,13 @@ function parsePrivXML(xmlStr) {
 }
 
 /* ═══ BUILDER XML ═══ */
+/* TipoRegolarizz valorizzato → si emette la coppia di attributi, con IdentInvioAttoINPS
+   presente anche se vuoto (come nel tracciato di riferimento). */
+const regolarizzAttr = (o) =>
+  o.TipoRegolarizz
+    ? ` TipoRegolarizz="${esc(o.TipoRegolarizz)}" IdentInvioAttoINPS="${esc(o.IdentInvioAttoINPS)}"`
+    : "";
+
 function buildPrivXML(cfg, aziende) {
   let x = `<?xml version="1.0" encoding="UTF-8"?>\n<DenunceMensili>\n`;
 
@@ -561,21 +608,27 @@ function buildPrivXML(cfg, aziende) {
       x += `      <Matricola>${esc(pos.Matricola)}</Matricola>\n`;
 
       for (const lav of pos.lavoratori) {
-        x += `      <DenunciaIndividuale>\n`;
+        x += `      <DenunciaIndividuale${regolarizzAttr(lav)}>\n`;
         x += `        <CFLavoratore>${esc(lav.CFLavoratore)}</CFLavoratore>\n`;
         x += `        <Cognome>${esc(lav.Cognome)}</Cognome>\n`;
         x += `        <Nome>${esc(lav.Nome)}</Nome>\n`;
-        x += `        <Qualifica1>${esc(lav.Qualifica1)}</Qualifica1>\n`;
-        x += `        <Qualifica2>${esc(lav.Qualifica2)}</Qualifica2>\n`;
-        x += `        <Qualifica3>${esc(lav.Qualifica3)}</Qualifica3>\n`;
-        x += `        <TipoContribuzione>${esc(lav.TipoContribuzione)}</TipoContribuzione>\n`;
-        x += `        <RegimePost95>${esc(lav.RegimePost95)}</RegimePost95>\n`;
-        x += `        <Cittadinanza>${esc(lav.Cittadinanza)}</Cittadinanza>\n`;
-        x += `        <UnitaOperativa>${esc(lav.UnitaOperativa)}</UnitaOperativa>\n`;
+        if (lav.EmailLav || lav.CellLav) {
+          x += `        <RecapitiLav>\n`;
+          if (lav.EmailLav) x += `          <EmailLav>${esc(lav.EmailLav)}</EmailLav>\n`;
+          if (lav.CellLav)  x += `          <CellLav>${esc(lav.CellLav)}</CellLav>\n`;
+          x += `        </RecapitiLav>\n`;
+        }
+        if (lav.Qualifica1) x += `        <Qualifica1>${esc(lav.Qualifica1)}</Qualifica1>\n`;
+        if (lav.Qualifica2) x += `        <Qualifica2>${esc(lav.Qualifica2)}</Qualifica2>\n`;
+        if (lav.Qualifica3) x += `        <Qualifica3>${esc(lav.Qualifica3)}</Qualifica3>\n`;
+        if (lav.TipoContribuzione) x += `        <TipoContribuzione>${esc(lav.TipoContribuzione)}</TipoContribuzione>\n`;
+        if (lav.RegimePost95) x += `        <RegimePost95>${esc(lav.RegimePost95)}</RegimePost95>\n`;
+        if (lav.Cittadinanza) x += `        <Cittadinanza>${esc(lav.Cittadinanza)}</Cittadinanza>\n`;
+        if (lav.UnitaOperativa) x += `        <UnitaOperativa>${esc(lav.UnitaOperativa)}</UnitaOperativa>\n`;
         if (lav.UnitaProduttiva) x += `        <UnitaProduttiva>${esc(lav.UnitaProduttiva)}</UnitaProduttiva>\n`;
         if (lav.CodiceComune) x += `        <CodiceComune>${esc(lav.CodiceComune)}</CodiceComune>\n`;
         if (lav.CodiceContratto) x += `        <CodiceContratto>${esc(lav.CodiceContratto)}</CodiceContratto>\n`;
-        x += `        <TipoCodiceContratto>${esc(lav.TipoCodiceContratto)}</TipoCodiceContratto>\n`;
+        if (lav.TipoCodiceContratto) x += `        <TipoCodiceContratto>${esc(lav.TipoCodiceContratto)}</TipoCodiceContratto>\n`;
         if (lav.QualProf) x += `        <QualProf>${esc(lav.QualProf)}</QualProf>\n`;
         if (lav.TipoPaga) x += `        <TipoPaga>${esc(lav.TipoPaga)}</TipoPaga>\n`;
         if (lav.DivisoreOrarioContr) x += `        <DivisoreOrarioContr>${esc(lav.DivisoreOrarioContr)}</DivisoreOrarioContr>\n`;
@@ -586,24 +639,24 @@ function buildPrivXML(cfg, aziende) {
         if (lav.PercPartTime) x += `        <PercPartTime>${esc(lav.PercPartTime)}</PercPartTime>\n`;
         if (lav.PercPartTimeMese)
           x += `        <PercPartTimeMese>${esc(lav.PercPartTimeMese)}</PercPartTimeMese>\n`;
-        x += `        <NumMensilita>${esc(lav.NumMensilita)}</NumMensilita>\n`;
+        if (lav.NumMensilita) x += `        <NumMensilita>${esc(lav.NumMensilita)}</NumMensilita>\n`;
 
         if (lav.hasCessazione) {
           x += `        <Cessazione>\n`;
           x += `          <GiornoCessazione>${esc(lav.GiornoCessazione)}</GiornoCessazione>\n`;
-          x += `          <TipoCessazione>${esc(lav.TipoCessazione)}</TipoCessazione>\n`;
+          if (lav.TipoCessazione) x += `          <TipoCessazione>${esc(lav.TipoCessazione)}</TipoCessazione>\n`;
           x += `        </Cessazione>\n`;
         }
         if (lav.hasAssunzione) {
           x += `        <Assunzione>\n`;
           x += `          <GiornoAssunzione>${esc(lav.GiornoAssunzione)}</GiornoAssunzione>\n`;
-          x += `          <TipoAssunzione>${esc(lav.TipoAssunzione)}</TipoAssunzione>\n`;
+          if (lav.TipoAssunzione) x += `          <TipoAssunzione>${esc(lav.TipoAssunzione)}</TipoAssunzione>\n`;
           x += `        </Assunzione>\n`;
         }
 
         const forzAttr = lav.ForzImpZero ? ' ForzImpZero="S"' : '';
         x += `        <DatiRetributivi${forzAttr}>\n`;
-        x += `          <TipoLavoratore>${esc(lav.TipoLavoratore)}</TipoLavoratore>\n`;
+        if (lav.TipoLavoratore) x += `          <TipoLavoratore>${esc(lav.TipoLavoratore)}</TipoLavoratore>\n`;
         if (lav.TipoLavStat) x += `          <TipoLavStat>${esc(lav.TipoLavStat)}</TipoLavStat>\n`;
 
         if (lav.TipoLavStat === "NR00" && lav.hasMaternita) {
@@ -621,8 +674,10 @@ function buildPrivXML(cfg, aziende) {
         for (const ad of lav.AltreADebito) {
           x += `          <AltreADebito>\n`;
           x += `            <CausaleADebito>${esc(ad.CausaleADebito)}</CausaleADebito>\n`;
-          if (ad.CausaleADebito === "M701" && ad.NumOre) x += `            <NumOre>${esc(ad.NumOre)}</NumOre>\n`;
-          if (ad.CausaleADebito === "M702" && ad.NumGG) x += `            <NumGG>${esc(ad.NumGG)}</NumGG>\n`;
+          // Il vincolo NumOre↔M701 / NumGG↔M702 non regge sui tracciati reali
+          // (esistono M702 con NumOre): si emette ciò che è valorizzato.
+          if (ad.NumOre) x += `            <NumOre>${esc(ad.NumOre)}</NumOre>\n`;
+          if (ad.NumGG) x += `            <NumGG>${esc(ad.NumGG)}</NumGG>\n`;
           if (ad.AltroImponibile) x += `            <AltroImponibile>${esc(ad.AltroImponibile)}</AltroImponibile>\n`;
           if (ad.ImportoADebito) x += `            <ImportoADebito>${esc(ad.ImportoADebito)}</ImportoADebito>\n`;
           x += `          </AltreADebito>\n`;
@@ -631,7 +686,9 @@ function buildPrivXML(cfg, aziende) {
         if (lav.RetribTeorica) x += `          <RetribTeorica>${esc(lav.RetribTeorica)}</RetribTeorica>\n`;
         if (lav.OreLavorabili) x += `          <OreLavorabili>${esc(lav.OreLavorabili)}</OreLavorabili>\n`;
 
-        const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
+        // Alcune ricostruzioni (denunce a zero, regolarizzazioni) non prevedono <Settimana>:
+        // il tracciato standard le vuole anche a copertura 0, quindi la scelta resta esplicita.
+        const setts = lav.EmettiSettimane === false ? [] : calcSettimane(az.AnnoMese, lav.giorni, lav);
         for (const s of setts) {
           x += `          <Settimana>\n`;
           x += `            <IdSettimana>${s.IdSettimana}</IdSettimana>\n`;
@@ -662,13 +719,19 @@ function buildPrivXML(cfg, aziende) {
           x += `          <DifferenzeAccredito>\n`;
           if (da.CodiceEvento) x += `            <CodiceEvento>${esc(da.CodiceEvento)}</CodiceEvento>\n`;
           if (da.DiffAccredito) x += `            <DiffAccredito>${esc(da.DiffAccredito)}</DiffAccredito>\n`;
+          if (da.MotivoEvento || da.DiffAccreditoEvento) {
+            x += `            <InfoEvento>\n`;
+            if (da.MotivoEvento) x += `              <MotivoEvento TipoMotivoEvento="${esc(da.TipoMotivoEvento)}">${esc(da.MotivoEvento)}</MotivoEvento>\n`;
+            if (da.DiffAccreditoEvento) x += `              <DiffAccreditoEvento>${esc(da.DiffAccreditoEvento)}</DiffAccreditoEvento>\n`;
+            x += `            </InfoEvento>\n`;
+          }
           x += `          </DifferenzeAccredito>\n`;
         }
 
         if (lav.GiorniRetribuiti) x += `          <GiorniRetribuiti>${esc(lav.GiorniRetribuiti)}</GiorniRetribuiti>\n`;
         if (lav.GiorniContribuiti) x += `          <GiorniContribuiti>${esc(lav.GiorniContribuiti)}</GiorniContribuiti>\n`;
         if (lav.OreContribuite) x += `          <OreContribuite>${esc(lav.OreContribuite)}</OreContribuite>\n`;
-        x += `          <RispettoMinimale>${esc(lav.RispettoMinimale || "S")}</RispettoMinimale>\n`;
+        if (lav.RispettoMinimale) x += `          <RispettoMinimale>${esc(lav.RispettoMinimale)}</RispettoMinimale>\n`;
         if (lav.SettimaneUtili) x += `          <SettimaneUtili>${esc(lav.SettimaneUtili)}</SettimaneUtili>\n`;
 
         for (const c of lav.InfoAggCausali) {
@@ -690,42 +753,48 @@ function buildPrivXML(cfg, aziende) {
 
         x += `        </DatiRetributivi>\n`;
 
-        x += `        <GestioneTFR>\n`;
-        if (lav.hasDestinazioneTFR) {
-          x += `          <DestinazioneTFR>\n`;
-          x += `            <TipoScelta>${esc(lav.DestTFR_TipoScelta)}</TipoScelta>\n`;
-          if (lav.DestTFR_DataScelta) x += `            <DataScelta>${esc(lav.DestTFR_DataScelta)}</DataScelta>\n`;
-          x += `            <ProfiloLav>\n`;
-          if (lav.DestTFR_IscrizPrevObbl) x += `              <IscrizPrevObbl>${esc(lav.DestTFR_IscrizPrevObbl)}</IscrizPrevObbl>\n`;
-          x += `              <IscrizPrevCompl>${esc(lav.DestTFR_IscrizPrevCompl)}</IscrizPrevCompl>\n`;
-          x += `            </ProfiloLav>\n`;
-          x += `            <SceltaDest><SceltaTFR><FondoTesoreria>${esc(lav.DestTFR_FondoTesoreria)}</FondoTesoreria></SceltaTFR></SceltaDest>\n`;
-          x += `          </DestinazioneTFR>\n`;
-        }
-        x += `          <MeseTFR>\n`;
-        x += `            <BaseCalcoloTFR>${esc(lav.BaseCalcoloTFR || "0,00")}</BaseCalcoloTFR>\n`;
-        if (lav.BaseCalcoloPrevCompl) x += `            <BaseCalcoloPrevCompl>${esc(lav.BaseCalcoloPrevCompl)}</BaseCalcoloPrevCompl>\n`;
-        if (lav.MisureCompensative.length > 0) {
-          x += `            <MisureCompensative>\n`;
-          for (const mc of lav.MisureCompensative) {
-            x += `              <MisCompACredito><CausaleMCACred>${esc(mc.CausaleMCACred)}</CausaleMCACred><ImportoMCACred>${esc(mc.ImportoMCACred)}</ImportoMCACred></MisCompACredito>\n`;
+        /* GestioneTFR solo se c'è davvero un dato TFR: emetterla sempre aggiungeva
+           un BaseCalcoloTFR 0,00 inventato ai tracciati che non la prevedono. */
+        const hasTFR = lav.hasDestinazioneTFR || lav.BaseCalcoloTFR ||
+                       lav.BaseCalcoloPrevCompl || lav.MisureCompensative.length > 0;
+        if (hasTFR) {
+          x += `        <GestioneTFR>\n`;
+          if (lav.hasDestinazioneTFR) {
+            x += `          <DestinazioneTFR>\n`;
+            if (lav.DestTFR_TipoScelta) x += `            <TipoScelta>${esc(lav.DestTFR_TipoScelta)}</TipoScelta>\n`;
+            if (lav.DestTFR_DataScelta) x += `            <DataScelta>${esc(lav.DestTFR_DataScelta)}</DataScelta>\n`;
+            x += `            <ProfiloLav>\n`;
+            if (lav.DestTFR_IscrizPrevObbl) x += `              <IscrizPrevObbl>${esc(lav.DestTFR_IscrizPrevObbl)}</IscrizPrevObbl>\n`;
+            x += `              <IscrizPrevCompl>${esc(lav.DestTFR_IscrizPrevCompl)}</IscrizPrevCompl>\n`;
+            x += `            </ProfiloLav>\n`;
+            x += `            <SceltaDest><SceltaTFR><FondoTesoreria>${esc(lav.DestTFR_FondoTesoreria)}</FondoTesoreria></SceltaTFR></SceltaDest>\n`;
+            x += `          </DestinazioneTFR>\n`;
           }
-          x += `            </MisureCompensative>\n`;
+          x += `          <MeseTFR>\n`;
+          x += `            <BaseCalcoloTFR>${esc(lav.BaseCalcoloTFR || "0,00")}</BaseCalcoloTFR>\n`;
+          if (lav.BaseCalcoloPrevCompl) x += `            <BaseCalcoloPrevCompl>${esc(lav.BaseCalcoloPrevCompl)}</BaseCalcoloPrevCompl>\n`;
+          if (lav.MisureCompensative.length > 0) {
+            x += `            <MisureCompensative>\n`;
+            for (const mc of lav.MisureCompensative) {
+              x += `              <MisCompACredito><CausaleMCACred>${esc(mc.CausaleMCACred)}</CausaleMCACred><ImportoMCACred>${esc(mc.ImportoMCACred)}</ImportoMCACred></MisCompACredito>\n`;
+            }
+            x += `            </MisureCompensative>\n`;
+          }
+          x += `          </MeseTFR>\n`;
+          x += `        </GestioneTFR>\n`;
         }
-        x += `          </MeseTFR>\n`;
-        x += `        </GestioneTFR>\n`;
         x += `      </DenunciaIndividuale>\n`;
       }
 
       const nLav = pos.lavoratori.length;
-      const totDeb = calcTotDebito(pos.lavoratori, az.AltrePartiteADebito);
+      const totDeb = calcTotDebito(pos.lavoratori, pos.AltrePartiteADebito);
       const totCred = calcTotCredito(pos.lavoratori);
       const forza = pos.ForzaAziendale || String(nLav);
-      x += `      <DenunciaAziendale>\n`;
+      x += `      <DenunciaAziendale${regolarizzAttr(pos)}>\n`;
       x += `        <TrattQuotaLav>${esc(pos.TrattQuotaLav || "S")}</TrattQuotaLav>\n`;
       x += `        <NumLavoratori>${nLav}</NumLavoratori>\n`;
       x += `        <ForzaAziendale>${esc(forza)}</ForzaAziendale>\n`;
-      for (const apd of az.AltrePartiteADebito) {
+      for (const apd of pos.AltrePartiteADebito) {
         x += `        <AltrePartiteADebito>\n`;
         x += `          <CausaleADebito>${esc(apd.CausaleADebito)}</CausaleADebito>\n`;
         if (apd.NumDip) x += `          <NumDip>${esc(apd.NumDip)}</NumDip>\n`;
@@ -933,6 +1002,10 @@ export default function UniEmensPriv() {
       setCfg(newCfg);
       setAziende(newAz.length ? newAz : [mkAzienda()]);
     } else {
+      // In append il mittente corrente vince, ma se è ancora vuoto va preso dal file
+      // invece di esportare una denuncia senza DatiMittente.
+      const cfgVuoto = Object.values(cfg).every(v => !v || v === "1");
+      if (cfgVuoto) setCfg(newCfg);
       setAziende(arr => [...arr, ...newAz]);
     }
     setImportPending(null);
@@ -954,8 +1027,11 @@ export default function UniEmensPriv() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = exportFilename(cfg, aziende);
+    // Firefox ignora il click su un anchor fuori dal DOM e revoca l'URL prima del download
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   /* ─────────── RENDER ─────────── */
@@ -964,8 +1040,8 @@ export default function UniEmensPriv() {
       {/* Header */}
       <div style={C.hdr}>
         <div>
-          <div style={C.hdrT}>⬛ UniEmens Privatistico Builder v1.0</div>
-          <div style={C.hdrS}>Multi-azienda · Settore privato e cantieri · IVS/DS · Co.co.co.</div>
+          <div style={C.hdrT}>⬛ UniEmens Privatistico Builder v1.1</div>
+          <div style={C.hdrS}>Settore privato e cantieri · IVS/DS · Co.co.co. · Regolarizzazioni</div>
         </div>
       </div>
 
@@ -995,7 +1071,7 @@ export default function UniEmensPriv() {
           </div>
           {aziende.map(a => {
             const nLav = a.poss.reduce((s,p) => s + p.lavoratori.length, 0);
-            const totDeb = a.poss.reduce((s,p) => s + calcTotDebito(p.lavoratori), 0);
+            const totDeb = a.poss.reduce((s,p) => s + calcTotDebito(p.lavoratori, p.AltrePartiteADebito), 0);
             const isAct = xAz === a.id;
             return (
               <div key={a.id} style={{marginBottom:"4px"}}>
@@ -1016,6 +1092,7 @@ export default function UniEmensPriv() {
                             <div style={{flex:1, fontSize:"11px"}}>
                               <span style={C.bdg("#0369A1")}>{p.Matricola || "MAT"}</span>
                               <span style={{marginLeft:"6px", color:"#6A7282"}}>{p.lavoratori.length} lav</span>
+                              {p.TipoRegolarizz && <span style={{...C.bdg("#92400E"), marginLeft:"5px"}}>{p.TipoRegolarizz}</span>}
                             </div>
                             <button style={{...C.btn("x"), padding:"1px 5px", fontSize:"9px"}} onClick={e=>{e.stopPropagation(); removePos(a.id, p.id);}}>✕</button>
                           </div>
@@ -1025,6 +1102,7 @@ export default function UniEmensPriv() {
                                 <div key={l.id} style={C.itemRow(xLav === l.id)} onClick={()=>{ setXLav(l.id); setXCollab(null); }}>
                                   <div style={{flex:1, fontSize:"11px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
                                     {l.Cognome || l.Nome ? `${l.Cognome} ${l.Nome}`.trim() : (l.CFLavoratore || "(nuovo)")}
+                                    {l.TipoRegolarizz && <span style={{...C.bdg("#92400E"), marginLeft:"5px"}}>{l.TipoRegolarizz}</span>}
                                   </div>
                                   <button style={{...C.btn("x"), padding:"1px 5px", fontSize:"9px"}} onClick={e=>{e.stopPropagation(); removeLav(a.id, p.id, l.id);}}>✕</button>
                                 </div>
@@ -1074,6 +1152,7 @@ export default function UniEmensPriv() {
             <div style={{marginBottom:"12px",fontSize:"12px",lineHeight:"1.6"}}>
               <div><b>{importPending.report.aziende}</b> aziende · <b>{importPending.report.posizioni}</b> posizioni · <b>{importPending.report.lavoratori}</b> lavoratori</div>
               <div><b>{importPending.report.collaboratori}</b> collaboratori · <b>{importPending.report.eventi}</b> eventi giorno (MAL/MA1)</div>
+              <div><b>{importPending.report.regolarizz}</b> sezioni con TipoRegolarizz</div>
               {importPending.report.warnings.length > 0 && (
                 <div style={{marginTop:"8px",color:"#92400E"}}>⚠ {importPending.report.warnings.join("; ")}</div>
               )}
@@ -1101,6 +1180,7 @@ export default function UniEmensPriv() {
               <div>Lavoratori: <b>{importReport.lavoratori}</b></div>
               <div>Collaboratori: <b>{importReport.collaboratori}</b></div>
               <div>Eventi giorno (MAL/MA1): <b>{importReport.eventi}</b></div>
+              <div>Sezioni in regolarizzazione: <b>{importReport.regolarizz}</b></div>
               {importReport.warnings.length > 0 && (<div style={{marginTop:"8px",color:"#92400E"}}>Warning: {importReport.warnings.join("; ")}</div>)}
               {importReport.ignored.length > 0 && (<div style={{marginTop:"4px",color:"#6A7282"}}>Ignorato: {importReport.ignored.join("; ")}</div>)}
             </div>
@@ -1168,42 +1248,57 @@ function renderAzForm(az, setAnnoMese, updateAz) {
         </div>
       </div>
 
-      <div style={C.sec}>
-        <div style={C.sT}>Altre Partite a Debito (DenunciaAziendale)</div>
-        {az.AltrePartiteADebito.length === 0 && <div style={C.empty}>Nessuna partita a debito aziendale</div>}
-        {az.AltrePartiteADebito.map((apd, i) => (
-          <div key={apd.id} style={{...C.row, alignItems:"flex-end"}}>
-            <F label="Causale" value={apd.CausaleADebito} onChange={v=>updateAz(az.id, {AltrePartiteADebito: az.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,CausaleADebito:v}:x)})} opts={[{v:"",l:"—"},...CAUSALE_APD]} w="160px"/>
-            <F label="NumDip" value={apd.NumDip} onChange={v=>updateAz(az.id, {AltrePartiteADebito: az.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,NumDip:v}:x)})} w="80px"/>
-            <F label="Retribuzione" value={apd.Retribuzione} onChange={v=>updateAz(az.id, {AltrePartiteADebito: az.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,Retribuzione:v}:x)})} w="120px"/>
-            <F label="Somma a debito" value={apd.SommaADebito} onChange={v=>updateAz(az.id, {AltrePartiteADebito: az.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,SommaADebito:v}:x)})} w="120px"/>
-            <button style={C.btn("x")} onClick={()=>updateAz(az.id, {AltrePartiteADebito: az.AltrePartiteADebito.filter(x=>x.id!==apd.id)})}>✕</button>
-          </div>
-        ))}
-        <button style={C.btn("d")} onClick={()=>updateAz(az.id, {AltrePartiteADebito:[...az.AltrePartiteADebito, {id:uid(),CausaleADebito:"M980",NumDip:"",Retribuzione:"",SommaADebito:""}]})}>+ Riga</button>
-      </div>
     </>
   );
 }
 
 function renderPosForm(az, pos, updatePos) {
-  const totDeb = calcTotDebito(pos.lavoratori);
+  const totDeb = calcTotDebito(pos.lavoratori, pos.AltrePartiteADebito);
   const totCred = calcTotCredito(pos.lavoratori);
+  const setApd = (patch) => updatePos(az.id, pos.id, patch);
   return (
-    <div style={C.sec}>
-      <div style={C.sT}>Posizione Contributiva</div>
-      <div style={C.row}>
-        <F label="Matricola INPS" value={pos.Matricola} onChange={v=>updatePos(az.id, pos.id, {Matricola:v})} w="200px"/>
-        <F label="Tratt. Quota Lav." value={pos.TrattQuotaLav} onChange={v=>updatePos(az.id, pos.id, {TrattQuotaLav:v})} opts={SI_NO} w="120px"/>
-        <F label="Forza Aziendale" value={pos.ForzaAziendale} onChange={v=>updatePos(az.id, pos.id, {ForzaAziendale:v})} ph={String(pos.lavoratori.length)} w="120px" note="auto da NumLav"/>
+    <>
+      <div style={C.sec}>
+        <div style={C.sT}>Posizione Contributiva</div>
+        <div style={C.row}>
+          <F label="Matricola INPS" value={pos.Matricola} onChange={v=>setApd({Matricola:v})} w="200px"/>
+          <F label="Tratt. Quota Lav." value={pos.TrattQuotaLav} onChange={v=>setApd({TrattQuotaLav:v})} opts={SI_NO} w="120px"/>
+          <F label="Forza Aziendale" value={pos.ForzaAziendale} onChange={v=>setApd({ForzaAziendale:v})} ph={String(pos.lavoratori.length)} w="120px" note="auto da NumLav"/>
+        </div>
+        <div style={{marginTop:"12px",padding:"10px",background:"#F0FDF4",borderRadius:"6px",fontSize:"12px"}}>
+          <div><b>Riepilogo PosContributiva</b></div>
+          <div>NumLavoratori: {pos.lavoratori.length}</div>
+          <div>Totale a Debito: € {totDeb}</div>
+          <div>Totale a Credito: € {totCred}</div>
+        </div>
       </div>
-      <div style={{marginTop:"12px",padding:"10px",background:"#F0FDF4",borderRadius:"6px",fontSize:"12px"}}>
-        <div><b>Riepilogo PosContributiva</b></div>
-        <div>NumLavoratori: {pos.lavoratori.length}</div>
-        <div>Totale a Debito: € {totDeb}</div>
-        <div>Totale a Credito: € {totCred}</div>
+
+      <div style={C.sec}>
+        <div style={C.sT}>Regolarizzazione — frontespizio (DenunciaAziendale)</div>
+        <div style={C.row}>
+          <F label="Tipo Regolarizz." value={pos.TipoRegolarizz} onChange={v=>setApd({TipoRegolarizz:v.toUpperCase()})} ph="es. RS" w="140px"/>
+          <F label="Ident. Invio Atto INPS" value={pos.IdentInvioAttoINPS} onChange={v=>setApd({IdentInvioAttoINPS:v})} ph="vuoto se assente" w="220px" disabled={!pos.TipoRegolarizz}/>
+        </div>
+        <div style={{fontSize:"11px",color:"#6A7282"}}>
+          Vuoto = denuncia ordinaria, nessun attributo nel tag. Valorizzato = <code>TipoRegolarizz</code> e <code>IdentInvioAttoINPS</code> su <code>&lt;DenunciaAziendale&gt;</code>.
+        </div>
       </div>
-    </div>
+
+      <div style={C.sec}>
+        <div style={C.sT}>Altre Partite a Debito (DenunciaAziendale)</div>
+        {pos.AltrePartiteADebito.length === 0 && <div style={C.empty}>Nessuna partita a debito</div>}
+        {pos.AltrePartiteADebito.map(apd => (
+          <div key={apd.id} style={{...C.row, alignItems:"flex-end"}}>
+            <F label="Causale" value={apd.CausaleADebito} onChange={v=>setApd({AltrePartiteADebito: pos.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,CausaleADebito:v}:x)})} opts={[{v:"",l:"—"},...CAUSALE_APD]} w="160px"/>
+            <F label="NumDip" value={apd.NumDip} onChange={v=>setApd({AltrePartiteADebito: pos.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,NumDip:v}:x)})} w="80px"/>
+            <F label="Retribuzione" value={apd.Retribuzione} onChange={v=>setApd({AltrePartiteADebito: pos.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,Retribuzione:v}:x)})} w="120px"/>
+            <F label="Somma a debito" value={apd.SommaADebito} onChange={v=>setApd({AltrePartiteADebito: pos.AltrePartiteADebito.map(x=>x.id===apd.id?{...x,SommaADebito:v}:x)})} w="120px"/>
+            <button style={C.btn("x")} onClick={()=>setApd({AltrePartiteADebito: pos.AltrePartiteADebito.filter(x=>x.id!==apd.id)})}>✕</button>
+          </div>
+        ))}
+        <button style={C.btn("d")} onClick={()=>setApd({AltrePartiteADebito:[...pos.AltrePartiteADebito, {id:uid(),CausaleADebito:"M980",NumDip:"",Retribuzione:"",SommaADebito:""}]})}>+ Riga</button>
+      </div>
+    </>
   );
 }
 
@@ -1236,7 +1331,9 @@ function renderCollabForm(az, c, updateCollab) {
 function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav) {
   const upd = (patch) => updateLav(az.id, pos.id, lav.id, patch);
   const ggLav = countGiorniLav(lav.giorni);
-  const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
+  // Ciò che il pannello mostra deve essere ciò che finisce nell'XML, flag compreso
+  const setts = lav.EmettiSettimane === false ? [] : calcSettimane(az.AnnoMese, lav.giorni, lav);
+  const avvisi = checkSettimane(setts, lav);
   const isNR00 = lav.TipoLavStat === "NR00";
 
   return (
@@ -1261,6 +1358,14 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
               <F label="Codice Fiscale" value={lav.CFLavoratore} onChange={v=>upd({CFLavoratore:v.toUpperCase()})} w="200px"/>
               <F label="Cognome" value={lav.Cognome} onChange={v=>upd({Cognome:v})} w="180px"/>
               <F label="Nome" value={lav.Nome} onChange={v=>upd({Nome:v})} w="180px"/>
+            </div>
+            <div style={C.row}>
+              <F label="Email (RecapitiLav)" value={lav.EmailLav} onChange={v=>upd({EmailLav:v})} w="260px"/>
+              <F label="Cellulare (RecapitiLav)" value={lav.CellLav} onChange={v=>upd({CellLav:v})} w="160px"/>
+            </div>
+            <div style={{...C.row, padding:"8px 10px", background:"#FFFBEB", borderRadius:"6px"}}>
+              <F label="Tipo Regolarizz." value={lav.TipoRegolarizz} onChange={v=>upd({TipoRegolarizz:v.toUpperCase()})} ph="es. RS" w="140px" note="su DenunciaIndividuale"/>
+              <F label="Ident. Invio Atto INPS" value={lav.IdentInvioAttoINPS} onChange={v=>upd({IdentInvioAttoINPS:v})} ph="vuoto se assente" w="220px" disabled={!lav.TipoRegolarizz}/>
             </div>
             <div style={C.row}>
               <F label="Qualifica1" value={lav.Qualifica1} onChange={v=>upd({Qualifica1:v})} opts={TIPO_Q1} w="180px"/>
@@ -1362,7 +1467,7 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
           </>
         )}
 
-        {lavTab === "gg" && renderGiorni(lav, upd, az.AnnoMese, ggLav, setts)}
+        {lavTab === "gg" && renderGiorni(lav, upd, az.AnnoMese, ggLav, setts, avvisi)}
 
         {lavTab === "opt" && (
           <>
@@ -1410,12 +1515,15 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
             {lav.DifferenzeAccredito.length === 0 && <div style={C.empty}>Nessuna voce</div>}
             {lav.DifferenzeAccredito.map(d => (
               <div key={d.id} style={{...C.row,alignItems:"flex-end"}}>
-                <F label="Codice Evento" value={d.CodiceEvento} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,CodiceEvento:v}:x)})} w="120px"/>
-                <F label="Diff. Accredito" value={d.DiffAccredito} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,DiffAccredito:v}:x)})} w="140px"/>
+                <F label="Codice Evento" value={d.CodiceEvento} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,CodiceEvento:v}:x)})} w="110px"/>
+                <F label="Diff. Accredito" value={d.DiffAccredito} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,DiffAccredito:v}:x)})} w="120px"/>
+                <F label="Tipo Motivo" value={d.TipoMotivoEvento} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,TipoMotivoEvento:v}:x)})} opts={TIPO_INFO_EVENTO} w="110px"/>
+                <F label="Motivo Evento" value={d.MotivoEvento} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,MotivoEvento:v}:x)})} ph="n.certificato" w="150px"/>
+                <F label="Diff. Acc. Evento" value={d.DiffAccreditoEvento} onChange={v=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.map(x=>x.id===d.id?{...x,DiffAccreditoEvento:v}:x)})} w="120px"/>
                 <button style={C.btn("x")} onClick={()=>upd({DifferenzeAccredito:lav.DifferenzeAccredito.filter(x=>x.id!==d.id)})}>✕</button>
               </div>
             ))}
-            <button style={C.btn("d")} onClick={()=>upd({DifferenzeAccredito:[...lav.DifferenzeAccredito, {id:uid(),CodiceEvento:"",DiffAccredito:""}]})}>+ Riga</button>
+            <button style={C.btn("d")} onClick={()=>upd({DifferenzeAccredito:[...lav.DifferenzeAccredito, {id:uid(),CodiceEvento:"",DiffAccredito:"",TipoMotivoEvento:"CM",MotivoEvento:"",DiffAccreditoEvento:""}]})}>+ Riga</button>
           </>
         )}
 
@@ -1461,7 +1569,7 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
   );
 }
 
-function renderGiorni(lav, upd, annoMese, ggLav, setts) {
+function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
   const cycleGiorno = (idx) => {
     const g = lav.giorni[idx];
     let next;
@@ -1505,13 +1613,33 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts) {
         })}
       </div>
       <div style={{padding:"8px 12px",background:"#F0F9FF",borderRadius:"6px",fontSize:"11px",marginBottom:"12px"}}>
-        Giorni lavorati (S): <b>{ggLav}</b> · Settimane coperte: <b>{setts.length}</b>
+        Giorni lavorati (S): <b>{ggLav}</b> · Settimane in denuncia: <b>{setts.length}</b>
         {setts.length > 0 && (
           <div style={{marginTop:"4px",fontFamily:"monospace",fontSize:"10px"}}>
             {setts.map(s => `W${s.IdSettimana}=${s.TipoCopertura}${s.CodiceEvento?`(${s.CodiceEvento})`:""}`).join(" · ")}
           </div>
         )}
+        <label style={{display:"flex",alignItems:"center",gap:"6px",marginTop:"8px",fontWeight:"600"}}>
+          <input type="checkbox" checked={lav.EmettiSettimane !== false} onChange={e=>upd({EmettiSettimane:e.target.checked})}/>
+          Emetti gli elementi <code>&lt;Settimana&gt;</code> nell'XML
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:"6px",marginTop:"4px",fontWeight:"600",opacity:lav.EmettiSettimane===false?0.45:1}}>
+          <input type="checkbox" disabled={lav.EmettiSettimane===false} checked={lav.AdeguaSettimane !== false} onChange={e=>upd({AdeguaSettimane:e.target.checked})}/>
+          Adegua automaticamente le settimane a GiorniRetribuiti (vincolo 02570E)
+        </label>
+        {lav.EmettiSettimane === false && (
+          <div style={{marginTop:"4px",color:"#92400E"}}>
+            Nessun elemento <code>&lt;Settimana&gt;</code> verrà scritto per questo lavoratore.
+          </div>
+        )}
       </div>
+
+      {avvisi.length > 0 && (
+        <div style={{padding:"8px 12px",background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:"6px",fontSize:"11px",marginBottom:"12px",color:"#991B1B"}}>
+          <b>Possibili scarti INPS</b>
+          {avvisi.map((a,i) => <div key={i} style={{marginTop:"3px"}}>⚠ {a}</div>)}
+        </div>
+      )}
 
       {eventiPresenti.length > 0 && (
         <div style={C.sec}>
