@@ -176,18 +176,31 @@ const C = {
 
 /* ═══ FIELD ═══ */
 function F({ label, value, onChange, ph="", w="140px", full=false, opts=null, type="text", note="", disabled=false }) {
-  /* Un valore importato non previsto in lista veniva mostrato come la prima opzione:
-     il select sembrava dire una cosa e lo stato ne conteneva un'altra.
-     Ora l'opzione viene aggiunta al volo e marcata. */
+  /* Lo stato e ciò che il select mostra devono coincidere, sempre.
+     1) Valore importato non previsto in lista: veniva mostrata la prima opzione.
+     2) Valore VUOTO su una lista senza opzione vuota: il browser ripiega su selectedIndex 0,
+        quindi il campo appariva compilato (es. "F – Full time") mentre lo stato era "".
+        L'XML usciva senza il tag e cliccare la voce già mostrata non emetteva onChange:
+        il campo era di fatto impossibile da correggere. Si aggiunge un segnaposto esplicito. */
   let options = opts;
-  if (opts && value && !opts.some(o => o.v === value)) {
-    options = [...opts, { v: value, l: `${value} — da file` }];
+  let vuotoNonImpostato = false;
+  if (opts) {
+    if (value && !opts.some(o => o.v === value)) {
+      options = [...opts, { v: value, l: `${value} — da file` }];
+    } else if (!value && !opts.some(o => o.v === "")) {
+      options = [{ v: "", l: "— non impostato —" }, ...opts];
+      vuotoNonImpostato = true;
+    }
   }
+  const selStyle = {
+    ...C.sel, opacity: disabled ? 0.5 : 1,
+    ...(vuotoNonImpostato ? { borderColor:"#F59E0B", background:"#FFFBEB", color:"#92400E" } : {}),
+  };
   return (
     <div style={{ display:"flex", flexDirection:"column", flex: full?"1 1 100%":`1 1 ${w}`, minWidth: full?"180px":w }}>
       <label style={C.lbl}>{label}{note&&<span style={{color:"#059669",marginLeft:"5px",fontWeight:"700",fontSize:"9px"}}>{note}</span>}</label>
       {options
-        ? <select style={{...C.sel, opacity:disabled?0.5:1}} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+        ? <select style={selStyle} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
         : <input type={type} style={{...C.inp, opacity:disabled?0.5:1}} disabled={disabled} value={value||""} onChange={e=>onChange(e.target.value)} placeholder={ph}/>}
     </div>
   );
@@ -367,12 +380,21 @@ function validaLav(lav, annoMese) {
   if (!lav.Nome) v.push({liv:"E", msg:"Nome mancante"});
   if (lav.TipoRegolarizz && !String(lav.IdentInvioAttoINPS||"").trim())
     v.push({liv:"E", msg:"31 — con TipoRegolarizz valorizzato, IdentInvioAttoINPS è obbligatorio"});
-  if (!lav.Qualifica1 || !lav.Qualifica2 || !lav.Qualifica3)
-    v.push({liv:"E", msg:"00090E — secondo e/o terzo carattere qualifica assenti (Qualifica1/2/3 sono tutte obbligatorie)"});
+  /* Dire QUALE qualifica manca, non "una delle tre": la select mostrava un valore
+     plausibile anche quando lo stato era vuoto, e l'avviso generico non aiutava a trovarla. */
+  const qMancanti = [
+    !lav.Qualifica1 && "Qualifica1", !lav.Qualifica2 && "Qualifica2", !lav.Qualifica3 && "Qualifica3",
+  ].filter(Boolean);
+  if (qMancanti.length)
+    v.push({liv:"E", msg:`00090E — ${qMancanti.join(" e ")} non impostat${qMancanti.length>1?"e":"a"}: seleziona un valore nel tab Anagrafica`});
   if (lav.Qualifica2 === "F" && lav.PercPartTime)
     v.push({liv:"E", msg:"00820E — Qualifica2 'F' (full time) non prevede PercPartTime"});
   if (["P","V","M"].includes(lav.Qualifica2) && !lav.PercPartTime)
     v.push({liv:"W", msg:"Qualifica2 part-time senza PercPartTime"});
+  /* 1527 — osservato sul part-time: SPUGNETTI (Q2='P', Contributo valorizzato, OreContribuite
+     assente) viene scartato, mentre lo stesso schema con Q2='F' passa. */
+  if (["P","V","M"].includes(lav.Qualifica2) && lav.Contributo && !lav.OreContribuite)
+    v.push({liv:"E", msg:"1527 — assenza di OreContribuite in presenza di Contributo (obbligatorio sul part-time): compilalo nel tab Retributivi"});
   if (lav.TipoLavStat !== "NR00" && !lav.Imponibile)
     v.push({liv:"W", msg:"Imponibile non valorizzato"});
   const mancanti = settimaneMancanti(annoMese, lav);
