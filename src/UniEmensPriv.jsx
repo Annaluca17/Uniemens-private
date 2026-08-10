@@ -193,6 +193,38 @@ function F({ label, value, onChange, ph="", w="140px", full=false, opts=null, ty
   );
 }
 
+/* ═══ PANNELLO VALIDAZIONE ═══ */
+function PannelloValidazione({ voci, titolo = "Quadri obbligatori" }) {
+  if (!voci || voci.length === 0) return null;
+  const err = voci.filter(v => v.liv === "E");
+  const warn = voci.filter(v => v.liv !== "E");
+  const grave = err.length > 0;
+  return (
+    <div style={{
+      padding:"9px 12px", marginBottom:"10px", borderRadius:"6px", fontSize:"11px", lineHeight:"1.6",
+      background: grave ? "#FEF2F2" : "#FFFBEB",
+      border: `1px solid ${grave ? "#FCA5A5" : "#FDE68A"}`,
+      color: grave ? "#991B1B" : "#92400E",
+    }}>
+      <b>{titolo}{grave ? ` — ${err.length} da correggere` : ""}</b>
+      {err.map((v,i) => <div key={`e${i}`}>✖ {v.msg}</div>)}
+      {warn.map((v,i) => <div key={`w${i}`} style={{color:"#92400E"}}>⚠ {v.msg}</div>)}
+    </div>
+  );
+}
+
+/* Pallino rosso/giallo in sidebar: dice dove guardare senza aprire ogni scheda. */
+function Pallino({ voci }) {
+  if (!voci || voci.length === 0) return null;
+  const grave = voci.some(v => v.liv === "E");
+  return (
+    <span title={voci.map(v => (v.liv === "E" ? "✖ " : "⚠ ") + v.msg).join("\n")}
+          style={{...C.bdg(grave ? "#991B1B" : "#92400E"), marginLeft:"5px"}}>
+      {grave ? "✖" : "⚠"}{voci.length}
+    </span>
+  );
+}
+
 /* ═══ CALCOLI ═══ */
 function isoWeek(d) {
   const tmp = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -238,9 +270,15 @@ function calcSettimane(annoMese, giorni, lav = {}) {
     // settimana ISO svuotava l'intero elenco quando il mese scavalca l'anno.
     if (gg < firstDay || gg > lastDay) return;
     const d = new Date(y, m-1, gg);
-    // La settimana appartiene al mese se il suo lunedì effettivo (dom → lun successivo) ci cade dentro
+    /* Regola UNIEMENS: la settimana va da domenica a sabato e, quando è a cavallo di due
+       mesi, si dichiara COME FRAZIONE IN ENTRAMBI i mesi mantenendo lo stesso IdSettimana.
+       Il vecchio filtro "la settimana appartiene al mese in cui cade il suo lunedì effettivo"
+       era una regola del gestionale, non di INPS: scartava la frazione iniziale del mese e
+       faceva scattare 07780E (giorno lavorato senza <Settimana> corrispondente).
+       Es. settimana 18/2025 = dom 27 apr → sab 3 mag: va sia in aprile sia in maggio.
+       Il TipoCopertura si calcola sulla sola frazione del mese, ed è già così perché
+       settMap aggrega unicamente i giorni di questo mese dentro il periodo di rapporto. */
     const mon = weekEffectiveMonday(d);
-    if (mon.getMonth() + 1 !== m || mon.getFullYear() !== y) return;
     const w = isoWeekForDay(d);
     if (!settMap.has(w)) settMap.set(w, {ord: mon.getTime(), tot:0, X:0, MAT:0, MAL:0});
     const s = settMap.get(w);
@@ -295,6 +333,93 @@ function checkSettimane(setts, lav) {
   if (gr > 0 && n > gr)  w.push(`02560E — settimane coperte (${n}) maggiori dei GiorniRetribuiti (${gr})`);
   if (gr > 0 && n > 0 && n * 6 < gr) w.push(`02570E — settimane coperte (${n}) × 6 minori dei GiorniRetribuiti (${gr})`);
   return w;
+}
+
+/* ═══ VALIDAZIONE — quadri obbligatori ═══ */
+/* I codici e i testi ricalcano i messaggi del validatore INPS, così l'avviso che vedi
+   qui e la riga del file di verifica si leggono allo stesso modo.
+   Livelli: "E" = il flusso viene scartato, "W" = da controllare. */
+
+/* 07780E — ogni giorno lavorato deve avere la sua <Settimana>. Confronta le settimane
+   effettivamente emesse con quelle dei giorni a S: se una manca, INPS scarta. */
+function settimaneMancanti(annoMese, lav) {
+  if (!annoMese || lav.EmettiSettimane === false) return [];
+  const [y, m] = String(annoMese).split("-").map(Number);
+  if (!y || !m) return [];
+  const nDays = lav.giorni.length;
+  const firstDay = lav.hasAssunzione ? Math.max(1, parseInt(lav.GiornoAssunzione) || 1) : 1;
+  const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
+  const emesse = new Set(calcSettimane(annoMese, lav.giorni, lav).map(s => s.IdSettimana));
+  const mancanti = new Set();
+  for (const g of lav.giorni) {
+    if (g.lavorato !== "S" && !g.evento) continue;
+    if (g.gg < firstDay || g.gg > lastDay) continue;
+    const w = isoWeekForDay(new Date(y, m - 1, g.gg));
+    if (!emesse.has(w)) mancanti.add(w);
+  }
+  return [...mancanti].sort((a, b) => a - b);
+}
+
+function validaLav(lav, annoMese) {
+  const v = [];
+  if (!lav.CFLavoratore) v.push({liv:"E", msg:"CFLavoratore mancante"});
+  if (!lav.Cognome) v.push({liv:"E", msg:"Cognome mancante"});
+  if (!lav.Nome) v.push({liv:"E", msg:"Nome mancante"});
+  if (lav.TipoRegolarizz && !String(lav.IdentInvioAttoINPS||"").trim())
+    v.push({liv:"E", msg:"31 — con TipoRegolarizz valorizzato, IdentInvioAttoINPS è obbligatorio"});
+  if (!lav.Qualifica1 || !lav.Qualifica2 || !lav.Qualifica3)
+    v.push({liv:"E", msg:"00090E — secondo e/o terzo carattere qualifica assenti (Qualifica1/2/3 sono tutte obbligatorie)"});
+  if (lav.Qualifica2 === "F" && lav.PercPartTime)
+    v.push({liv:"E", msg:"00820E — Qualifica2 'F' (full time) non prevede PercPartTime"});
+  if (["P","V","M"].includes(lav.Qualifica2) && !lav.PercPartTime)
+    v.push({liv:"W", msg:"Qualifica2 part-time senza PercPartTime"});
+  if (lav.TipoLavStat !== "NR00" && !lav.Imponibile)
+    v.push({liv:"W", msg:"Imponibile non valorizzato"});
+  const mancanti = settimaneMancanti(annoMese, lav);
+  if (mancanti.length)
+    v.push({liv:"E", msg:`07780E — giorni lavorati senza <Settimana> corrispondente: settimana ${mancanti.join(", ")} assente`});
+  return v;
+}
+
+function validaPos(pos) {
+  const v = [];
+  if (!pos.Matricola) v.push({liv:"E", msg:"Matricola mancante"});
+  if (pos.TipoRegolarizz && !String(pos.IdentInvioAttoINPS||"").trim())
+    v.push({liv:"E", msg:"31 — con TipoRegolarizz valorizzato, IdentInvioAttoINPS è obbligatorio su DenunciaAziendale"});
+  return v;
+}
+
+function validaAz(az) {
+  const v = [];
+  if (!az.AnnoMese) v.push({liv:"E", msg:"AnnoMeseDenuncia mancante"});
+  if (!az.CFAzienda) v.push({liv:"E", msg:"CFAzienda mancante"});
+  if (!az.RagSocAzienda) v.push({liv:"E", msg:"RagSocAzienda mancante"});
+  return v;
+}
+
+function validaCfg(cfg) {
+  const v = [];
+  if (!cfg.CFMittente) v.push({liv:"E", msg:"DatiMittente: CFMittente mancante"});
+  if (!cfg.RagSocMittente) v.push({liv:"W", msg:"DatiMittente: RagSocMittente mancante"});
+  return v;
+}
+
+/* Raccolta piatta per il controllo pre-export: ogni voce porta con sé dove sta. */
+function validaTutto(cfg, aziende) {
+  const out = validaCfg(cfg).map(x => ({...x, dove:"Dati Mittente"}));
+  for (const az of aziende) {
+    const et = az.RagSocAzienda || az.CFAzienda || "(azienda)";
+    validaAz(az).forEach(x => out.push({...x, dove: et}));
+    for (const pos of az.poss) {
+      const ep = `${et} · ${pos.Matricola || "(matricola)"}`;
+      validaPos(pos).forEach(x => out.push({...x, dove: ep}));
+      for (const lav of pos.lavoratori) {
+        const el = `${ep} · ${`${lav.Cognome||""} ${lav.Nome||""}`.trim() || lav.CFLavoratore || "(lavoratore)"}`;
+        validaLav(lav, az.AnnoMese).forEach(x => out.push({...x, dove: el}));
+      }
+    }
+  }
+  return out;
 }
 
 function calcTotDebito(lavs, altrePartite = []) {
@@ -923,6 +1048,16 @@ export default function UniEmensPriv() {
     ...a, collaboratori: a.collaboratori.map(c => c.id===cId ? {...c, ...patch} : c)
   }));
 
+  /* Se le denunce sono ordinarie, TipoRegolarizz va tolto ovunque: lasciarlo senza
+     IdentInvioAttoINPS fa scartare il flusso (errore 31), e toglierlo lavoratore per
+     lavoratore su una matricola popolata è una perdita di tempo. */
+  const azzeraRegolarizz = (azId, posId) => setAziende(arr => arr.map(a => a.id!==azId ? a : {
+    ...a, poss: a.poss.map(p => p.id!==posId ? p : {
+      ...p, TipoRegolarizz:"", IdentInvioAttoINPS:"",
+      lavoratori: p.lavoratori.map(l => ({...l, TipoRegolarizz:"", IdentInvioAttoINPS:""})),
+    })
+  }));
+
   /* ── AnnoMese change → ridimensiona giorni di tutti i lavoratori dell'azienda ── */
   const setAnnoMese = (azId, am) => {
     setAziende(arr => arr.map(a => {
@@ -1057,6 +1192,15 @@ export default function UniEmensPriv() {
 
   /* ── Export ── */
   const handleExport = () => {
+    /* Meglio fermarsi qui che scoprire lo scarto dal file di verifica INPS.
+       Resta una conferma, non un blocco: le ricostruzioni parziali vanno salvate lo stesso. */
+    const problemi = validaTutto(cfg, aziende);
+    const err = problemi.filter(p => p.liv === "E");
+    if (err.length) {
+      const elenco = err.slice(0, 15).map(p => `• [${p.dove}] ${p.msg}`).join("\n");
+      const extra = err.length > 15 ? `\n…e altri ${err.length - 15}.` : "";
+      if (!confirm(`${err.length} quadri obbligatori incompleti: INPS scarterà il flusso.\n\n${elenco}${extra}\n\nEsportare comunque?`)) return;
+    }
     if (!aziende.length || !aziende[0].AnnoMese) {
       if (!confirm("AnnoMese non impostato sulla prima azienda. Esportare comunque?")) return;
     }
@@ -1119,7 +1263,10 @@ export default function UniEmensPriv() {
                     matricola: selPos ha la precedenza nel render e l'Anno-Mese restava irraggiungibile. */}
                 <div style={C.itemRow(isAct)} onClick={()=>{ setXAz(a.id); setXPos(null); setXLav(null); setXCollab(null); }}>
                   <div style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
-                    <div style={{fontWeight:"600", fontSize:"12px"}}>{a.RagSocAzienda || a.CFAzienda || "(nuova azienda)"}</div>
+                    <div style={{fontWeight:"600", fontSize:"12px"}}>
+                      {a.RagSocAzienda || a.CFAzienda || "(nuova azienda)"}
+                      <Pallino voci={validaAz(a)}/>
+                    </div>
                     <div style={{fontSize:"10px", color:"#6A7282"}}>{a.AnnoMese || "—"} · {nLav} lav · €{totDeb}</div>
                   </div>
                   <button style={{...C.btn("x"), padding:"2px 6px", fontSize:"10px"}} onClick={e=>{e.stopPropagation(); removeAzienda(a.id);}}>✕</button>
@@ -1135,6 +1282,7 @@ export default function UniEmensPriv() {
                               <span style={C.bdg("#0369A1")}>{p.Matricola || "MAT"}</span>
                               <span style={{marginLeft:"6px", color:"#6A7282"}}>{p.lavoratori.length} lav</span>
                               {p.TipoRegolarizz && <span style={{...C.bdg("#92400E"), marginLeft:"5px"}}>{p.TipoRegolarizz}</span>}
+                              <Pallino voci={validaPos(p)}/>
                             </div>
                             <button style={{...C.btn("x"), padding:"1px 5px", fontSize:"9px"}} onClick={e=>{e.stopPropagation(); removePos(a.id, p.id);}}>✕</button>
                           </div>
@@ -1145,6 +1293,7 @@ export default function UniEmensPriv() {
                                   <div style={{flex:1, fontSize:"11px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
                                     {l.Cognome || l.Nome ? `${l.Cognome} ${l.Nome}`.trim() : (l.CFLavoratore || "(nuovo)")}
                                     {l.TipoRegolarizz && <span style={{...C.bdg("#92400E"), marginLeft:"5px"}}>{l.TipoRegolarizz}</span>}
+                                    <Pallino voci={validaLav(l, a.AnnoMese)}/>
                                   </div>
                                   <button style={{...C.btn("x"), padding:"1px 5px", fontSize:"9px"}} onClick={e=>{e.stopPropagation(); removeLav(a.id, p.id, l.id);}}>✕</button>
                                 </div>
@@ -1180,7 +1329,7 @@ export default function UniEmensPriv() {
         <div style={C.main}>
           {selCollab ? renderCollabForm(selAz, selCollab, updateCollab) :
            selLav ? renderLavForm(selAz, selPos, selLav, lavTab, setLavTab, updateLav, duplicateLav) :
-           selPos ? renderPosForm(selAz, selPos, updatePos) :
+           selPos ? renderPosForm(selAz, selPos, updatePos, azzeraRegolarizz) :
            selAz ? renderAzForm(selAz, setAnnoMese, updateAz) :
            renderMittenteForm(cfg, updateCfg)}
         </div>
@@ -1241,6 +1390,7 @@ function renderMittenteForm(cfg, updateCfg) {
   return (
     <div style={C.sec}>
       <div style={C.sT}>Dati Mittente</div>
+      <PannelloValidazione voci={validaCfg(cfg)}/>
       <div style={C.row}>
         <F label="TipoMittente" value={cfg.TipoMittente} onChange={v=>updateCfg({TipoMittente:v})} opts={TIPO_MITT} w="220px"/>
         <F label="CF Persona Mittente" value={cfg.CFPersonaMittente} onChange={v=>updateCfg({CFPersonaMittente:v.toUpperCase()})} w="200px"/>
@@ -1266,6 +1416,7 @@ function renderAzForm(az, setAnnoMese, updateAz) {
   const nLav = az.poss.reduce((s,p) => s + p.lavoratori.length, 0);
   return (
     <>
+      <PannelloValidazione voci={validaAz(az)}/>
       <div style={C.sec}>
         <div style={C.sT}>Configurazione Azienda</div>
         <div style={C.row}>
@@ -1302,12 +1453,13 @@ function renderAzForm(az, setAnnoMese, updateAz) {
   );
 }
 
-function renderPosForm(az, pos, updatePos) {
+function renderPosForm(az, pos, updatePos, azzeraRegolarizz) {
   const totDeb = calcTotDebito(pos.lavoratori, pos.AltrePartiteADebito);
   const totCred = calcTotCredito(pos.lavoratori);
   const setApd = (patch) => updatePos(az.id, pos.id, patch);
   return (
     <>
+      <PannelloValidazione voci={validaPos(pos)}/>
       <div style={C.sec}>
         <div style={C.sT}>Posizione Contributiva</div>
         <div style={C.row}>
@@ -1331,7 +1483,14 @@ function renderPosForm(az, pos, updatePos) {
         </div>
         <div style={{fontSize:"11px",color:"#6A7282"}}>
           Vuoto = denuncia ordinaria, nessun attributo nel tag. Valorizzato = <code>TipoRegolarizz</code> e <code>IdentInvioAttoINPS</code> su <code>&lt;DenunciaAziendale&gt;</code>.
+          Se <code>TipoRegolarizz</code> è valorizzato, <code>IdentInvioAttoINPS</code> diventa obbligatorio (errore 31).
         </div>
+        {(pos.TipoRegolarizz || pos.lavoratori.some(l => l.TipoRegolarizz)) && (
+          <button style={{...C.btn("w"), marginTop:"8px"}}
+                  onClick={()=>{ if (confirm(`Togliere TipoRegolarizz e IdentInvioAttoINPS dalla matricola e da tutti i suoi ${pos.lavoratori.length} lavoratori?\n\nUsalo se le denunce sono ordinarie e non regolarizzazioni.`)) azzeraRegolarizz(az.id, pos.id); }}>
+            Azzera regolarizzazione su tutta la matricola
+          </button>
+        )}
       </div>
 
       <div style={C.sec}>
@@ -1394,6 +1553,10 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
         </div>
         <button style={C.btn("d")} onClick={()=>duplicateLav(az.id, pos.id, lav.id)}>Duplica</button>
       </div>
+
+      {/* I quadri obbligatori vanno segnalati mentre si compila, non dopo lo scarto INPS.
+          Sta fuori dai tab perché l'errore può riguardare un tab non aperto. */}
+      <PannelloValidazione voci={validaLav(lav, az.AnnoMese)}/>
 
       <div style={C.tabsBar}>
         {[["anag","Anagrafica"],["retr","Retributivi"],["gg","Giorni"],["opt","Opzionali"],["tfr","TFR"]].map(([k,l])=>(
