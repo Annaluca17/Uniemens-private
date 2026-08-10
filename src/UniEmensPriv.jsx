@@ -32,6 +32,8 @@ const CAUSALE_AD=[{v:"M701",l:"M701 – Orario"},{v:"M702",l:"M702 – Giornalie
 const CAUSALE_APD=[{v:"M980",l:"M980 – EBNA/ART1"},{v:"M900",l:"M900 – Fondo solidarietà"}];
 const TIPO_RAPPORTO=[{v:"1E",l:"1E – Co.co.co."}];
 const TIPO_INFO_EVENTO=[{v:"CM",l:"CM – Certificato"},{v:"DT",l:"DT – Data"}];
+/* Etichette settimana indicizzate 0=lun … 6=dom (l'ordine in cui il calendario impagina le colonne). */
+const DOW_LABELS=["lun","mar","mer","gio","ven","sab","dom"];
 
 /* ═══ FACTORIES ═══ */
 const mkGiorni = (n) => Array.from({length:n}, (_,i) => ({
@@ -130,7 +132,7 @@ const C = {
   empty: { textAlign:"center", color:"#94A3B8", padding:"32px", fontSize:"12px", fontStyle:"italic" },
   modal: { position:"fixed", inset:0, background:"rgba(15,23,42,0.45)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000 },
   modalBox:{ background:"#FFFFFF", border:"1px solid #E5E7EB", borderRadius:"10px", padding:"22px 26px", maxWidth:"640px", width:"92%", maxHeight:"82vh", overflowY:"auto", boxShadow:"0 16px 48px rgba(0,0,0,0.2)" },
-  giornoCell: (state) => {
+  giornoCell: (state, { weekend=false, fuori=false } = {}) => {
     const map = {
       N: { bg:"#F1F5F9", fg:"#64748B", bd:"#CBD5E1" },
       S: { bg:"#DCFCE7", fg:"#166534", bd:"#86EFAC" },
@@ -138,8 +140,19 @@ const C = {
       MA1:{ bg:"#DBEAFE", fg:"#1E40AF", bd:"#93C5FD" },
     };
     const s = map[state] || map.N;
-    return { width:"38px", height:"36px", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", border:`1px solid ${s.bd}`, borderRadius:"5px", background:s.bg, color:s.fg, cursor:"pointer", fontSize:"10px", fontWeight:"700", userSelect:"none" };
+    return {
+      width:"100%", minHeight:"42px", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+      // Il sabato/domenica resta cliccabile: il tratteggio segnala il weekend senza vietare il turno festivo.
+      border: weekend && state === "N" ? `1px dashed ${s.bd}` : `1px solid ${s.bd}`,
+      borderRadius:"5px", background:s.bg, color:s.fg, cursor:"pointer", fontSize:"10px", fontWeight:"700", userSelect:"none",
+      // Fuori dal periodo di rapporto i giorni non entrano in calcSettimane: vanno visti come inerti.
+      opacity: fuori ? 0.4 : 1,
+    };
   },
+  dowHead: (weekend) => ({
+    textAlign:"center", fontSize:"9px", fontWeight:"700", letterSpacing:"0.06em", textTransform:"uppercase",
+    color: weekend ? "#94A3B8" : "#6A7282", paddingBottom:"2px",
+  }),
 };
 
 /* ═══ FIELD ═══ */
@@ -1585,6 +1598,28 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
     upd({ giorni: lav.giorni.map(g => ({...g, lavorato:lav_state, tipoCoperturaGiorn:"", evento:null})) });
   };
   const fillGGRetr = () => upd({ GiorniRetribuiti: String(ggLav) });
+
+  /* Impagina il mese per giorno della settimana. Senza AnnoMese valido non si sa a che
+     giorno corrisponda il GG 1: si ricade sulla griglia lineare e il riempimento è inibito. */
+  const [annoY, annoM] = String(annoMese||"").split("-").map(Number);
+  const dataMese = !!(annoY && annoM);
+  // 0=lun … 6=dom, l'indice di colonna del calendario.
+  const dowOf = (gg) => (new Date(annoY, annoM-1, gg).getDay() + 6) % 7;
+  // Stessi estremi usati da calcSettimane: fuori dal rapporto i giorni non fanno settimana.
+  const nDays = lav.giorni.length;
+  const firstDay = lav.hasAssunzione ? Math.max(1, parseInt(lav.GiornoAssunzione) || 1) : 1;
+  const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
+  const fuoriRapporto = (gg) => gg < firstDay || gg > lastDay;
+
+  /* Lun–ven a S, weekend a N. I giorni fuori dal periodo di rapporto restano N: marcarli S
+     gonfierebbe ggLav — e quindi GiorniRetribuiti — con giorni che non sono in forza. */
+  const fillLunVen = () => {
+    upd({ giorni: lav.giorni.map(g => ({
+      ...g,
+      lavorato: (dowOf(g.gg) <= 4 && !fuoriRapporto(g.gg)) ? "S" : "N",
+      tipoCoperturaGiorn: "", evento: null,
+    })) });
+  };
   const editEventInfo = (idx, infoVal) => {
     const g = lav.giorni[idx];
     if (!g.evento) return;
@@ -1599,19 +1634,44 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
         <div style={{fontSize:"11px",color:"#6A7282"}}>Click per ciclare: <b>N</b> → <b>S</b> → <b>MAL</b> → <b>MA1</b> → N</div>
         <button style={C.btn("s")} onClick={()=>setAll("S")}>Tutti S</button>
         <button style={C.btn("d")} onClick={()=>setAll("N")}>Tutti N</button>
+        <button style={{...C.btn("s"), opacity: dataMese?1:0.45, cursor: dataMese?"pointer":"not-allowed"}}
+                disabled={!dataMese} onClick={fillLunVen}
+                title={dataMese ? "Lun–ven a S, sabato e domenica a N (solo nel periodo di rapporto)" : "Imposta prima Anno/Mese della denuncia"}>
+          Compila Lun–Ven
+        </button>
         <button style={C.btn("d")} onClick={fillGGRetr}>Auto GiorniRetribuiti</button>
       </div>
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(40px, 1fr))", gap:"4px", marginBottom:"12px"}}>
-        {lav.giorni.map((g, i) => {
-          const st = stateOf(g);
-          return (
-            <div key={i} style={C.giornoCell(st)} onClick={()=>cycleGiorno(i)} title={`Giorno ${g.gg}: ${st}`}>
-              <div style={{fontSize:"9px",opacity:0.7}}>{g.gg}</div>
-              <div>{st}</div>
-            </div>
-          );
-        })}
-      </div>
+      {dataMese ? (
+        <div style={{display:"grid", gridTemplateColumns:"repeat(7, minmax(0, 1fr))", gap:"4px", marginBottom:"12px", maxWidth:"420px"}}>
+          {DOW_LABELS.map((d, i) => <div key={`h${d}`} style={C.dowHead(i >= 5)}>{d}</div>)}
+          {/* Celle vuote fino al giorno in cui cade il GG 1. */}
+          {Array.from({length: dowOf(1)}, (_, i) => <div key={`pad${i}`} />)}
+          {lav.giorni.map((g, i) => {
+            const st = stateOf(g);
+            const dow = dowOf(g.gg);
+            const fuori = fuoriRapporto(g.gg);
+            return (
+              <div key={i} style={C.giornoCell(st, {weekend: dow >= 5, fuori})} onClick={()=>cycleGiorno(i)}
+                   title={`${DOW_LABELS[dow]} ${g.gg}: ${st}${fuori ? " — fuori dal periodo di rapporto" : ""}`}>
+                <div style={{fontSize:"11px",opacity:0.75}}>{g.gg}</div>
+                <div>{st}</div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(40px, 1fr))", gap:"4px", marginBottom:"12px"}}>
+          {lav.giorni.map((g, i) => {
+            const st = stateOf(g);
+            return (
+              <div key={i} style={C.giornoCell(st)} onClick={()=>cycleGiorno(i)} title={`Giorno ${g.gg}: ${st}`}>
+                <div style={{fontSize:"11px",opacity:0.75}}>{g.gg}</div>
+                <div>{st}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div style={{padding:"8px 12px",background:"#F0F9FF",borderRadius:"6px",fontSize:"11px",marginBottom:"12px"}}>
         Giorni lavorati (S): <b>{ggLav}</b> · Settimane in denuncia: <b>{setts.length}</b>
         {setts.length > 0 && (
