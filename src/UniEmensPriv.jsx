@@ -910,9 +910,14 @@ function buildPrivXML(cfg, aziende) {
           x += `          </DifferenzeAccredito>\n`;
         }
 
+        /* L'ordine è vincolato dalla <sequence> dello schema: OreContribuite sta FRA
+           GiorniRetribuiti e GiorniContribuiti. Emetterla dopo GiorniContribuiti faceva
+           scartare il flusso con "invalid child element 'OreContribuite'".
+           Confermato su 1638 DenunceIndividuali reali accettate da INPS:
+           GiorniRetribuiti > OreContribuite > RispettoMinimale > SettimaneUtili. */
         if (lav.GiorniRetribuiti) x += `          <GiorniRetribuiti>${esc(lav.GiorniRetribuiti)}</GiorniRetribuiti>\n`;
-        if (lav.GiorniContribuiti) x += `          <GiorniContribuiti>${esc(lav.GiorniContribuiti)}</GiorniContribuiti>\n`;
         if (lav.OreContribuite) x += `          <OreContribuite>${esc(lav.OreContribuite)}</OreContribuite>\n`;
+        if (lav.GiorniContribuiti) x += `          <GiorniContribuiti>${esc(lav.GiorniContribuiti)}</GiorniContribuiti>\n`;
         if (lav.RispettoMinimale) x += `          <RispettoMinimale>${esc(lav.RispettoMinimale)}</RispettoMinimale>\n`;
         if (lav.SettimaneUtili) x += `          <SettimaneUtili>${esc(lav.SettimaneUtili)}</SettimaneUtili>\n`;
 
