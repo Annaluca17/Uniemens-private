@@ -53,6 +53,14 @@ const TIPO_RAPPORTO=[{v:"1E",l:"1E – Co.co.co."}];
 const TIPO_INFO_EVENTO=[{v:"CM",l:"CM – Certificato"},{v:"DT",l:"DT – Data"}];
 /* Etichette settimana indicizzate 0=lun … 6=dom (l'ordine in cui il calendario impagina le colonne). */
 const DOW_LABELS=["lun","mar","mer","gio","ven","sab","dom"];
+/* TipoCopertura della <Settimana>. "auto" = ricavato dai giorni, gli altri forzano. */
+const TIPO_COPERTURA=[
+  {v:"",l:"auto (dai giorni)"},
+  {v:"X",l:"X – completa"},
+  {v:"1",l:"1 – evento tutta la settimana"},
+  {v:"2",l:"2 – parziale"},
+  {v:"0",l:"0 – non lavorata"},
+];
 
 /* ═══ FACTORIES ═══ */
 const mkGiorni = (n) => Array.from({length:n}, (_,i) => ({
@@ -80,7 +88,7 @@ const mkLav = (annoMese="") => ({
   Imponibile:"", Contributo:"",
   AltreADebito:[], RetribTeorica:"", OreLavorabili:"",
   giorni: mkGiorni(giorniMese(annoMese)||30),
-  EmettiSettimane: true, AdeguaSettimane: true,
+  EmettiSettimane: true, AdeguaSettimane: true, SettimaneOverride: {},
   GiorniRetribuiti:"", GiorniContribuiti:"", OreContribuite:"",
   RispettoMinimale:"S", SettimaneUtili:"",
   InfoAggCausali:[], DatiParticolari:[],
@@ -267,6 +275,23 @@ function isoWeekForDay(d) {
   return isoWeek(d);
 }
 
+/* Numero di settimane ISO dell'anno: la settimana del 28 dicembre è sempre l'ultima. */
+function settimaneNellAnno(y) {
+  return isoWeek(new Date(y, 11, 28));
+}
+
+/* IdSettimana progressivo NELL'ANNO DELLA DENUNCIA.
+   A cavallo d'anno la numerazione ISO riparte da 1: i giorni 29-31 dicembre 2025 cadono
+   nella settimana ISO 1 del 2026, ma nella denuncia di dicembre INPS pretende la 53
+   (02990E — "settimana non congrua con il periodo della denuncia").
+   La stessa settimana fisica prende quindi numeri diversi nelle due denunce: 53 a
+   dicembre, 1 a gennaio. */
+function idSettimana(d, meseDenuncia, annoDenuncia) {
+  const w = isoWeekForDay(d);
+  if (meseDenuncia === 12 && w === 1) return settimaneNellAnno(annoDenuncia) + 1;
+  return w;
+}
+
 function calcSettimane(annoMese, giorni, lav = {}) {
   if (!annoMese) return [];
   const [y, m] = annoMese.split("-").map(Number);
@@ -292,7 +317,7 @@ function calcSettimane(annoMese, giorni, lav = {}) {
        Il TipoCopertura si calcola sulla sola frazione del mese, ed è già così perché
        settMap aggrega unicamente i giorni di questo mese dentro il periodo di rapporto. */
     const mon = weekEffectiveMonday(d);
-    const w = isoWeekForDay(d);
+    const w = idSettimana(d, m, y);
     if (!settMap.has(w)) settMap.set(w, {ord: mon.getTime(), tot:0, X:0, MAT:0, MAL:0});
     const s = settMap.get(w);
     s.tot++;
@@ -334,7 +359,16 @@ function calcSettimane(annoMese, giorni, lav = {}) {
     }
   }
 
-  return result;
+  /* Forzatura manuale del TipoCopertura, per settimana. Va applicata per ultima: deve
+     vincere sia sul calcolo dai giorni sia sull'adeguamento a GiorniRetribuiti.
+     Serve perché la copertura di una settimana non è sempre deducibile dalla griglia
+     S/N: una settimana può essere retribuita senza giorni lavorati (ferie, festività). */
+  const ov = lav.SettimaneOverride || {};
+  return result.map(s => {
+    const forz = ov[s.IdSettimana];
+    if (!forz) return s;
+    return { ...s, TipoCopertura: forz, CodiceEvento: (forz === "1" || forz === "2") ? (s.CodiceEvento || "MAL") : null };
+  });
 }
 
 /* Vincoli INPS su settimane / giorni retribuiti: segnalati, non nascosti. */
@@ -381,7 +415,9 @@ function settimaneMancanti(annoMese, lav) {
   for (const g of lav.giorni) {
     if (g.lavorato !== "S" && !g.evento) continue;
     if (g.gg < firstDay || g.gg > lastDay) continue;
-    const w = isoWeekForDay(new Date(y, m - 1, g.gg));
+    // Stessa numerazione di calcSettimane (a dicembre la 53, non la 1), altrimenti
+    // il controllo segnala come mancante una settimana che in realtà c'è.
+    const w = idSettimana(new Date(y, m - 1, g.gg), m, y);
     if (!emesse.has(w)) mancanti.add(w);
   }
   return [...mancanti].sort((a, b) => a - b);
@@ -703,6 +739,26 @@ function parsePrivXML(xmlStr) {
                 Importo: impEl?.textContent?.trim() || "",
                 Periodo: impEl?.getAttribute("Periodo") || "",
               });
+            }
+          }
+
+          /* Le <Settimana> del file vanno conservate quando divergono dal calcolo automatico:
+             la copertura non è sempre deducibile dai giorni (una settimana può essere
+             retribuita senza giorni lavorati) e prima della forzatura manuale la
+             riesportazione le riscriveva silenziosamente. Solo le divergenze diventano
+             override, così l'automatismo resta attivo dove già concorda. */
+          const settFile = directChildren(drEl, "Settimana");
+          if (settFile.length) {
+            const calcolate = new Map(
+              calcSettimane(az.AnnoMese, lav.giorni, {...lav, SettimaneOverride: {}})
+                .map(s => [String(s.IdSettimana), s.TipoCopertura])
+            );
+            for (const sEl of settFile) {
+              const id = childTxt(sEl, "IdSettimana");
+              const tc = childTxt(sEl, "TipoCopertura");
+              // Un IdSettimana che il calcolo non produce è un numero errato nel file
+              // (es. la 1 al posto della 53 a dicembre): forzarlo non avrebbe effetto.
+              if (id && tc && calcolate.has(id) && calcolate.get(id) !== tc) lav.SettimaneOverride[id] = tc;
             }
           }
         }
@@ -1866,6 +1922,13 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
   };
   const fillGGRetr = () => upd({ GiorniRetribuiti: String(ggLav) });
 
+  const ov = lav.SettimaneOverride || {};
+  const setOverride = (id, tc) => {
+    const next = { ...ov };
+    if (tc) next[id] = tc; else delete next[id];   // stringa vuota = torna al calcolo automatico
+    upd({ SettimaneOverride: next });
+  };
+
   /* Impagina il mese per giorno della settimana. Senza AnnoMese valido non si sa a che
      giorno corrisponda il GG 1: si ricade sulla griglia lineare e il riempimento è inibito. */
   const [annoY, annoM] = String(annoMese||"").split("-").map(Number);
@@ -1878,12 +1941,12 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
   const lastDay  = lav.hasCessazione ? Math.min(nDays, parseInt(lav.GiornoCessazione) || nDays) : nDays;
   const fuoriRapporto = (gg) => gg < firstDay || gg > lastDay;
 
-  /* Lun–ven a S, weekend a N. I giorni fuori dal periodo di rapporto restano N: marcarli S
+  /* Lun–sab a S, domenica a N. I giorni fuori dal periodo di rapporto restano N: marcarli S
      gonfierebbe ggLav — e quindi GiorniRetribuiti — con giorni che non sono in forza. */
-  const fillLunVen = () => {
+  const fillLunSab = () => {
     upd({ giorni: lav.giorni.map(g => ({
       ...g,
-      lavorato: (dowOf(g.gg) <= 4 && !fuoriRapporto(g.gg)) ? "S" : "N",
+      lavorato: (dowOf(g.gg) <= 5 && !fuoriRapporto(g.gg)) ? "S" : "N",
       tipoCoperturaGiorn: "", evento: null,
     })) });
   };
@@ -1902,9 +1965,9 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
         <button style={C.btn("s")} onClick={()=>setAll("S")}>Tutti S</button>
         <button style={C.btn("d")} onClick={()=>setAll("N")}>Tutti N</button>
         <button style={{...C.btn("s"), opacity: dataMese?1:0.45, cursor: dataMese?"pointer":"not-allowed"}}
-                disabled={!dataMese} onClick={fillLunVen}
-                title={dataMese ? "Lun–ven a S, sabato e domenica a N (solo nel periodo di rapporto)" : "Imposta prima Anno/Mese della denuncia"}>
-          Compila Lun–Ven
+                disabled={!dataMese} onClick={fillLunSab}
+                title={dataMese ? "Lun–sab a S, domenica a N (solo nel periodo di rapporto)" : "Imposta prima Anno/Mese della denuncia"}>
+          Compila Lun–Sab
         </button>
         <button style={C.btn("d")} onClick={fillGGRetr}>Auto GiorniRetribuiti</button>
       </div>
@@ -1942,9 +2005,36 @@ function renderGiorni(lav, upd, annoMese, ggLav, setts, avvisi) {
       <div style={{padding:"8px 12px",background:"#F0F9FF",borderRadius:"6px",fontSize:"11px",marginBottom:"12px"}}>
         Giorni lavorati (S): <b>{ggLav}</b> · Settimane in denuncia: <b>{setts.length}</b>
         {setts.length > 0 && (
-          <div style={{marginTop:"4px",fontFamily:"monospace",fontSize:"10px"}}>
-            {setts.map(s => `W${s.IdSettimana}=${s.TipoCopertura}${s.CodiceEvento?`(${s.CodiceEvento})`:""}`).join(" · ")}
-          </div>
+          <>
+            {/* La copertura non è sempre deducibile dai giorni: una settimana può essere
+                retribuita senza giorni lavorati. Quindi ogni settimana è forzabile a mano. */}
+            <div style={{display:"flex",flexWrap:"wrap",gap:"8px",marginTop:"8px"}}>
+              {setts.map(s => {
+                const forz = !!ov[s.IdSettimana];
+                return (
+                  <div key={s.IdSettimana} style={{
+                    display:"flex",flexDirection:"column",gap:"2px",padding:"5px 7px",borderRadius:"5px",
+                    background: forz ? "#FFFBEB" : "#FFFFFF",
+                    border: `1px solid ${forz ? "#FDE68A" : "#D9E3EC"}`,
+                  }}>
+                    <div style={{fontSize:"10px",fontWeight:"700",color:"#0369A1",fontFamily:"monospace"}}>
+                      W{s.IdSettimana} = {s.TipoCopertura}{s.CodiceEvento?` (${s.CodiceEvento})`:""}
+                    </div>
+                    <select style={{...C.sel, fontSize:"10px", padding:"3px 5px"}}
+                            value={ov[s.IdSettimana] || ""}
+                            onChange={e=>setOverride(s.IdSettimana, e.target.value)}>
+                      {TIPO_COPERTURA.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+            {Object.keys(ov).length > 0 && (
+              <div style={{marginTop:"6px"}}>
+                <button style={C.btn("d")} onClick={()=>upd({SettimaneOverride:{}})}>Riporta tutte le settimane ad auto</button>
+              </div>
+            )}
+          </>
         )}
         <label style={{display:"flex",alignItems:"center",gap:"6px",marginTop:"8px",fontWeight:"600"}}>
           <input type="checkbox" checked={lav.EmettiSettimane !== false} onChange={e=>upd({EmettiSettimane:e.target.checked})}/>
