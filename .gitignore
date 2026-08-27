@@ -1,0 +1,17 @@
+node_modules
+dist
+.vite
+*.local
+.DS_Store
+*.log
+.env*
+.claude/
+
+# Generato da build-standalone.ps1 a partire da src/ e vendor/: rigenerabile in un
+# comando, e pesa 3 MB che cambierebbero a ogni modifica del sorgente.
+standalone.html
+
+# Dati reali: flussi UniEmens ed esiti del validatore contengono codici fiscali,
+# nomi e cognomi di lavoratori. Il repo è pubblico: questi file NON vanno pushati.
+samples/
+_archivio/
