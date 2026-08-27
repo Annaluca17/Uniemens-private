@@ -247,14 +247,6 @@ function Pallino({ voci }) {
 }
 
 /* ═══ CALCOLI ═══ */
-function isoWeek(d) {
-  const tmp = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  tmp.setHours(0,0,0,0);
-  tmp.setDate(tmp.getDate() + 3 - (tmp.getDay() + 6) % 7);
-  const week1 = new Date(tmp.getFullYear(), 0, 4);
-  return 1 + Math.round(((tmp - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
-}
-
 function weekEffectiveMonday(d) {
   // In UniEmens Sunday belongs to the FOLLOWING week: use next Monday for attribution
   if (d.getDay() === 0) {
@@ -266,30 +258,20 @@ function weekEffectiveMonday(d) {
   return mon;
 }
 
-function isoWeekForDay(d) {
-  // In UniEmens Sunday belongs to the following week (isoWeek of next Monday)
-  if (d.getDay() === 0) {
-    const next = new Date(d); next.setDate(d.getDate() + 1);
-    return isoWeek(next);
-  }
-  return isoWeek(d);
-}
-
-/* Numero di settimane ISO dell'anno: la settimana del 28 dicembre è sempre l'ultima. */
-function settimaneNellAnno(y) {
-  return isoWeek(new Date(y, 11, 28));
-}
-
 /* IdSettimana progressivo NELL'ANNO DELLA DENUNCIA.
-   A cavallo d'anno la numerazione ISO riparte da 1: i giorni 29-31 dicembre 2025 cadono
-   nella settimana ISO 1 del 2026, ma nella denuncia di dicembre INPS pretende la 53
-   (02990E — "settimana non congrua con il periodo della denuncia").
-   La stessa settimana fisica prende quindi numeri diversi nelle due denunce: 53 a
-   dicembre, 1 a gennaio. */
-function idSettimana(d, meseDenuncia, annoDenuncia) {
-  const w = isoWeekForDay(d);
-  if (meseDenuncia === 12 && w === 1) return settimaneNellAnno(annoDenuncia) + 1;
-  return w;
+   La settimana 1 è quella che contiene il 1° gennaio dell'anno di denuncia; da lì la
+   numerazione avanza di sette giorni in sette giorni. NON è la settimana ISO: la ISO 1
+   è la prima con almeno quattro giorni nel nuovo anno, quindi quando il 1° gennaio cade
+   di venerdì, sabato o domenica (2021, 2022, 2023, 2027…) comincia una settimana più
+   tardi e TUTTI i numeri dell'anno risultano sfalsati di uno.
+   La stessa settimana fisica prende numeri diversi nelle due denunce a cavallo d'anno:
+   28/12/2020-3/1/2021 è la 53 a dicembre 2020 e la 1 a gennaio 2021. Sbagliare il numero
+   costa un 02990E ("settimana non congrua con il periodo della denuncia") sulla settimana
+   inesistente, più un 07780E per ogni giorno lavorato che finisce così senza copertura. */
+function idSettimana(d, annoDenuncia) {
+  const base = weekEffectiveMonday(new Date(annoDenuncia, 0, 1));
+  const mon = weekEffectiveMonday(d);
+  return Math.round((mon - base) / 604800000) + 1;
 }
 
 function calcSettimane(annoMese, giorni, lav = {}) {
@@ -317,7 +299,7 @@ function calcSettimane(annoMese, giorni, lav = {}) {
        Il TipoCopertura si calcola sulla sola frazione del mese, ed è già così perché
        settMap aggrega unicamente i giorni di questo mese dentro il periodo di rapporto. */
     const mon = weekEffectiveMonday(d);
-    const w = idSettimana(d, m, y);
+    const w = idSettimana(d, y);
     if (!settMap.has(w)) settMap.set(w, {ord: mon.getTime(), tot:0, X:0, MAT:0, MAL:0});
     const s = settMap.get(w);
     s.tot++;
@@ -417,7 +399,7 @@ function settimaneMancanti(annoMese, lav) {
     if (g.gg < firstDay || g.gg > lastDay) continue;
     // Stessa numerazione di calcSettimane (a dicembre la 53, non la 1), altrimenti
     // il controllo segnala come mancante una settimana che in realtà c'è.
-    const w = idSettimana(new Date(y, m - 1, g.gg), m, y);
+    const w = idSettimana(new Date(y, m - 1, g.gg), y);
     if (!emesse.has(w)) mancanti.add(w);
   }
   return [...mancanti].sort((a, b) => a - b);
