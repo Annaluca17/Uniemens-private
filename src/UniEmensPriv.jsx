@@ -24,7 +24,7 @@ const impDec = (v) => {
 /* TipoCodiceContratto è a lunghezza fissa 2: "2" viene scartato, "02" no. */
 const cod2 = (v) => { const s = String(v ?? "").trim(); return s.length === 1 ? "0" + s : s; };
 
-function giorniMese(annoMese) {
+export function giorniMese(annoMese) {
   if (!annoMese) return 30;
   const [y, m] = annoMese.split("-").map(Number);
   if (!y || !m) return 30;
@@ -274,7 +274,7 @@ function idSettimana(d, annoDenuncia) {
   return Math.round((mon - base) / 604800000) + 1;
 }
 
-function calcSettimane(annoMese, giorni, lav = {}) {
+export function calcSettimane(annoMese, giorni, lav = {}) {
   if (!annoMese) return [];
   const [y, m] = annoMese.split("-").map(Number);
   if (!y || !m) return [];
@@ -354,7 +354,7 @@ function calcSettimane(annoMese, giorni, lav = {}) {
 }
 
 /* Vincoli INPS su settimane / giorni retribuiti: segnalati, non nascosti. */
-function checkSettimane(setts, lav) {
+export function checkSettimane(setts, lav) {
   const gr = parseIt(lav.GiorniRetribuiti);
   const n = setts.filter(s => s.TipoCopertura !== "0").length;
   const w = [];
@@ -828,7 +828,7 @@ const regolarizzAttr = (o) => {
   return a;
 };
 
-function buildPrivXML(cfg, aziende) {
+export function buildPrivXML(cfg, aziende) {
   let x = `<?xml version="1.0" encoding="UTF-8"?>\n<DenunceMensili>\n`;
 
   /* DatiMittente */
@@ -1104,6 +1104,143 @@ function exportFilename(cfg, aziende) {
   return `UNIE${yymm}.xml`;
 }
 
+/* ═══ IMPORT MASSIVO PERIODI ═══
+   Una sola persona, molti mesi: la ricostruzione tipica di un periodo scoperto.
+   Struttura e anagrafica vengono dal lavoratore già caricato nel builder; dall'incolla
+   arrivano soltanto i valori che cambiano di mese in mese. Il caso opposto — un mese,
+   molte persone — non passa di qui: lì cambia la struttura di ogni lavoratore, e
+   conviene importare l'XML del mese precedente e ritoccarlo. */
+
+/* ZIP senza compressione (metodo "store"): sessanta righe e nessuna libreria, invece
+   del mega di una dipendenza esterna dentro uno standalone che pesa già 3 MB. */
+function crc32(buf) {
+  let tbl = crc32._t;
+  if (!tbl) {
+    tbl = crc32._t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      tbl[n] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ tbl[(crc ^ buf[i]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+export function zipStore(files) {
+  const enc = new TextEncoder();
+  const u16 = (n) => [n & 0xFF, (n >>> 8) & 0xFF];
+  const u32 = (n) => [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF];
+  const now = new Date();
+  // orario e data in formato MS-DOS: con zero al posto della data Esplora risorse protesta
+  const dosT = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosD = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+
+  const pezzi = [], centrali = [];
+  let offset = 0;
+  for (const f of files) {
+    const nome = enc.encode(f.name);
+    const dati = enc.encode(f.text);
+    const crc = crc32(dati);
+    const locale = Uint8Array.from([
+      ...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(dosT), ...u16(dosD),
+      ...u32(crc), ...u32(dati.length), ...u32(dati.length),
+      ...u16(nome.length), ...u16(0), ...nome,
+    ]);
+    pezzi.push(locale, dati);
+    centrali.push(Uint8Array.from([
+      ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
+      ...u16(dosT), ...u16(dosD),
+      ...u32(crc), ...u32(dati.length), ...u32(dati.length),
+      ...u16(nome.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(0), ...u32(offset), ...nome,
+    ]));
+    offset += locale.length + dati.length;
+  }
+  const dirSize = centrali.reduce((s, c) => s + c.length, 0);
+  const fine = Uint8Array.from([
+    ...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(files.length), ...u16(files.length),
+    ...u32(dirSize), ...u32(offset), ...u16(0),
+  ]);
+  return new Blob([...pezzi, ...centrali, fine], { type: "application/zip" });
+}
+
+/* Riconosce 2021-01, 2021/01, 01-2021, 01/2021 e 202101. */
+export function normalizzaAnnoMese(s) {
+  const t = String(s || "").trim();
+  let m;
+  if ((m = t.match(/^(\d{4})[-/.](\d{1,2})$/))) return `${m[1]}-${String(+m[2]).padStart(2, "0")}`;
+  if ((m = t.match(/^(\d{1,2})[-/.](\d{4})$/))) return `${m[2]}-${String(+m[1]).padStart(2, "0")}`;
+  if ((m = t.match(/^(\d{4})(\d{2})$/))) return `${m[1]}-${m[2]}`;
+  return null;
+}
+
+/* L'incolla da Excel arriva separato da TAB; il CSV italiano dal punto e virgola.
+   La virgola NON è separatore: è il decimale degli importi. */
+export function parsePeriodi(testo) {
+  const righe = String(testo || "").split(/\r?\n/).map(r => r.trim()).filter(Boolean);
+  const out = [];
+  righe.forEach((riga, i) => {
+    const celle = riga.split(/[\t;]/).map(c => c.trim());
+    const am = normalizzaAnnoMese(celle[0]);
+    if (!am) {
+      // prima riga senza mese riconoscibile: è l'intestazione del modello, si salta
+      if (i === 0) return;
+      out.push({ n: i + 1, grezza: riga, errore: `"${celle[0]}" non è un mese valido (attesi 2021-01 o 01/2021)` });
+      return;
+    }
+    const imponibile = parseIt(celle[1]);
+    if (!(imponibile > 0)) {
+      out.push({ n: i + 1, grezza: riga, AnnoMese: am, errore: `imponibile "${celle[1] || ""}" non valido` });
+      return;
+    }
+    const aliquota = celle[2] ? parseIt(celle[2]) : 1.61;
+    const giorniRetr = celle[3] ? String(Math.round(parseIt(celle[3]))) : "26";
+    out.push({ n: i + 1, AnnoMese: am, imponibile, aliquota, GiorniRetribuiti: giorniRetr });
+  });
+  return out;
+}
+
+/* Un periodo = un'azienda con dentro il solo lavoratore modello, ricalibrato.
+   L'imponibile resta INTERO nell'XML (il tracciato non ammette decimali), ma il
+   contributo si calcola sull'imponibile REALE coi centesimi: sui flussi trasmessi
+   le due regole divergono di un centesimo circa una volta su venti. */
+export function costruisciPeriodo(cfg, azMod, posMod, lavMod, riga) {
+  const [y, m] = riga.AnnoMese.split("-").map(Number);
+  const nGiorni = giorniMese(riga.AnnoMese);
+  const giorni = Array.from({ length: nGiorni }, (_, i) => ({
+    gg: i + 1,
+    lavorato: new Date(y, m - 1, i + 1).getDay() === 0 ? "N" : "S",
+    tipoCoperturaGiorn: "", evento: null,
+  }));
+  const contributo = Math.round(riga.imponibile * riga.aliquota) / 100;
+  const lav = {
+    ...lavMod, id: uid(), giorni, SettimaneOverride: {},
+    Imponibile: String(Math.round(riga.imponibile)),
+    RetribTeorica: String(Math.round(riga.imponibile)),
+    Contributo: contributo.toFixed(2).replace(".", ","),
+    GiorniRetribuiti: riga.GiorniRetribuiti,
+  };
+  const az = {
+    ...azMod, id: uid(), AnnoMese: riga.AnnoMese,
+    poss: [{ ...posMod, id: uid(), lavoratori: [lav] }],
+    collaboratori: [],
+  };
+  const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
+  const voci = [
+    ...validaLav(lav, az.AnnoMese),
+    ...checkSettimane(setts, lav).map(msg => ({ liv: "W", msg })),
+  ];
+  return {
+    riga, az, lav, setts, voci,
+    nome: exportFilename(cfg, [az]),
+    giorniLav: countGiorniLav(giorni),
+    contributo,
+  };
+}
+
 /* ═══ APP ═══ */
 export default function UniEmensPriv() {
   const [cfg, setCfg] = useState(EMPTY_CFG);
@@ -1117,6 +1254,8 @@ export default function UniEmensPriv() {
   const [importPending, setImportPending] = useState(null); // {cfg, aziende, report}
   const [showCollabPanel, setShowCollabPanel] = useState(false);
   const fileRef = useRef(null);
+  const [periodiOpen, setPeriodiOpen] = useState(false);
+  const [periodiTesto, setPeriodiTesto] = useState("");
 
   /* ── Selezioni / lookup ── */
   const selAz = aziende.find(a => a.id === xAz);
@@ -1307,6 +1446,47 @@ export default function UniEmensPriv() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
+
+  /* ── Import massivo periodi ── */
+  /* Il modello e' il lavoratore selezionato, o il primo che si trova: da li' arrivano
+     anagrafica, qualifiche, matricola e frontespizio. L'incolla porta solo i valori
+     che cambiano di mese in mese. */
+  const azModello = selAz || aziende[0] || null;
+  const posModello = selPos || azModello?.poss[0] || null;
+  const lavModello = selLav || posModello?.lavoratori[0] || null;
+
+  const righePeriodi = periodiOpen ? parsePeriodi(periodiTesto) : [];
+  const esitiPeriodi = (periodiOpen && lavModello && azModello && posModello)
+    ? righePeriodi.map(r => r.errore
+        ? { riga: r, errore: r.errore }
+        : costruisciPeriodo(cfg, azModello, posModello, lavModello, r))
+    : [];
+  /* Due righe sullo stesso mese produrrebbero due voci con lo stesso nome dentro lo ZIP. */
+  const visti = {};
+  esitiPeriodi.forEach(e => {
+    if (e.errore) return;
+    const k = e.az.AnnoMese;
+    if (visti[k]) e.duplicato = true; else visti[k] = true;
+  });
+  const periodiBloccanti = esitiPeriodi.filter(
+    e => e.errore || e.duplicato || (e.voci || []).some(v => v.liv === "E")
+  ).length;
+
+  const generaPeriodi = (forza) => {
+    const buoni = esitiPeriodi.filter(e => !e.errore && !e.duplicato);
+    if (!buoni.length) return;
+    if (periodiBloccanti && !forza) return;
+    const files = buoni.map(e => ({ name: e.nome, text: buildPrivXML(cfg, [e.az]) }));
+    const mesi = buoni.map(e => e.az.AnnoMese).sort();
+    const cognome = (lavModello.Cognome || "UNIEMENS").replace(/[^A-Za-z0-9]/g, "");
+    const nomeZip = `UNIEMENS_${cognome}_${mesi[0]}_${mesi[mesi.length - 1]}.zip`;
+    const url = URL.createObjectURL(zipStore(files));
+    const a = document.createElement("a");
+    a.href = url; a.download = nomeZip;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   /* ─────────── RENDER ─────────── */
   return (
     <div style={C.app}>
@@ -1328,6 +1508,10 @@ export default function UniEmensPriv() {
         <button style={C.btn("d")} onClick={()=> selAz && addCollab(selAz.id)} disabled={!selAz}>+ Collab.</button>
         <div style={{flex:1}}/>
         <button style={C.btn("i")} onClick={()=> fileRef.current?.click()}>Importa XML</button>
+        <button style={C.btn("i")} onClick={()=> setPeriodiOpen(true)} disabled={!lavModello}
+                title={lavModello ? "Genera un flusso per ogni mese incollato" : "Serve prima un lavoratore caricato, da cui prendere anagrafica e struttura"}>
+          Import periodi
+        </button>
         <input type="file" accept=".xml" ref={fileRef} style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0]; if(f) handleImport(f); e.target.value="";}}/>
         <button style={C.btn("s")} onClick={handleExport}>Esporta XML</button>
         <button style={C.btn("x")} onClick={reset}>Reset</button>
@@ -1425,6 +1609,82 @@ export default function UniEmensPriv() {
            renderMittenteForm(cfg, updateCfg)}
         </div>
       </div>
+
+      {/* Modal: import massivo periodi */}
+      {periodiOpen && (
+        <div style={C.modal} onClick={()=>setPeriodiOpen(false)}>
+          <div style={{...C.modalBox, maxWidth:"920px", width:"92vw"}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{margin:"0 0 4px",color:"#0369A1"}}>Import periodi — una persona, molti mesi</h3>
+            <div style={{fontSize:"11px",color:"#6A7282",marginBottom:"10px",lineHeight:"1.6"}}>
+              Anagrafica, qualifiche, matricola e frontespizio vengono da <b>{lavModello?.Cognome} {lavModello?.Nome}</b>.
+              Dall&apos;incolla arrivano solo i valori che cambiano.<br/>
+              Colonne: <b>Mese</b> · <b>Imponibile</b> · <b>Aliquota %</b> (default 1,61) · <b>Giorni retribuiti</b> (default 26).
+              Seleziona l&apos;intervallo in Excel e incolla: il TAB fa da separatore, la virgola resta il decimale.
+              L&apos;imponibile scrivilo <b>coi centesimi</b> — nell&apos;XML ci va intero, ma il contributo si calcola sul valore reale.
+              I giorni sono da calendario, lun-sab lavorati.
+            </div>
+            <textarea
+              value={periodiTesto}
+              onChange={e=>setPeriodiTesto(e.target.value)}
+              placeholder={"2020-12\t1062,61\n2021-01\t950,09\n2021-02\t950,09\t1,61\t26"}
+              style={{width:"100%",height:"110px",fontFamily:"ui-monospace,Consolas,monospace",fontSize:"12px",
+                      padding:"8px",border:"1px solid #CBD5E1",borderRadius:"6px",resize:"vertical"}}
+            />
+            {esitiPeriodi.length > 0 && (
+              <div style={{maxHeight:"38vh",overflow:"auto",margin:"10px 0",border:"1px solid #E2E8F0",borderRadius:"6px"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"11px"}}>
+                  <thead>
+                    <tr style={{background:"#F1F5F9",position:"sticky",top:0}}>
+                      {["", "Mese", "File", "Imponibile", "Contributo", "gg", "Settimane", "Esito"].map((h,i)=>(
+                        <th key={i} style={{padding:"5px 7px",textAlign:"left",fontWeight:"700",borderBottom:"1px solid #E2E8F0"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {esitiPeriodi.map((e, i) => {
+                      const gravi = e.errore || e.duplicato || (e.voci || []).some(v => v.liv === "E");
+                      const avvisi = (e.voci || []).filter(v => v.liv !== "E");
+                      return (
+                        <tr key={i} style={{background: gravi ? "#FEF2F2" : (avvisi.length ? "#FFFBEB" : "#fff")}}>
+                          <td style={{padding:"4px 7px"}}>{gravi ? "\u2716" : (avvisi.length ? "\u26A0" : "\u2713")}</td>
+                          <td style={{padding:"4px 7px"}}>{e.errore ? (e.riga.AnnoMese || e.riga.grezza) : e.az.AnnoMese}</td>
+                          <td style={{padding:"4px 7px",fontFamily:"ui-monospace,monospace"}}>{e.nome || ""}</td>
+                          <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Imponibile : ""}</td>
+                          <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Contributo : ""}</td>
+                          <td style={{padding:"4px 7px",textAlign:"right"}}>{e.giorniLav ?? ""}</td>
+                          <td style={{padding:"4px 7px"}}>{(e.setts||[]).map(s=>`${s.IdSettimana}${s.TipoCopertura}`).join(" ")}</td>
+                          <td style={{padding:"4px 7px",color: gravi ? "#991B1B" : "#92400E"}}>
+                            {e.errore || (e.duplicato ? "mese ripetuto nell'incolla" : (e.voci||[]).map(v=>v.msg).join(" · "))}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{fontSize:"12px",flex:1}}>
+                {esitiPeriodi.length
+                  ? <span><b>{esitiPeriodi.length - periodiBloccanti}</b> flussi pronti
+                      {periodiBloccanti ? <span style={{color:"#991B1B"}}> · <b>{periodiBloccanti}</b> da sistemare</span> : null}</span>
+                  : <span style={{color:"#6A7282"}}>Incolla le righe per vedere l&apos;anteprima.</span>}
+              </div>
+              <button style={C.btn("d")} onClick={()=>setPeriodiOpen(false)}>Chiudi</button>
+              <button style={C.btn("s")} disabled={!esitiPeriodi.length || periodiBloccanti > 0}
+                      onClick={()=>generaPeriodi(false)}>
+                Scarica ZIP
+              </button>
+              {periodiBloccanti > 0 && esitiPeriodi.length > periodiBloccanti && (
+                <button style={C.btn("x")}
+                        onClick={()=>{ if (confirm(`${periodiBloccanti} righe hanno errori e verranno saltate. Generare le altre?`)) generaPeriodi(true); }}>
+                  Genera solo le valide
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal: import pending */}
       {importPending && (
