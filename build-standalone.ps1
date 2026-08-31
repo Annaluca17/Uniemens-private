@@ -16,9 +16,10 @@ $src      = & $read "src\UniEmensPriv.jsx"
 # Rimuove gli import ESM e l'export default: in modalita' standalone React e' un global UMD.
 $src = $src -replace '(?m)^\s*import\s+.*?from\s+".*?";\s*$', ''
 $src = $src -replace 'export\s+default\s+function\s+UniEmensPriv', 'function UniEmensPriv'
-# Le funzioni pure sono esportate per i test (vitest). Qui siamo in uno <script> semplice,
-# non in un modulo: un 'export' rimasto e' un errore di sintassi e la pagina resta bianca.
-$src = $src -replace '(?m)^export\s+function\s+', 'function '
+# Funzioni e costanti pure sono esportate per i test (vitest). Qui siamo in uno <script>
+# semplice, non in un modulo: un 'export' rimasto e' un errore di sintassi e la pagina resta
+# bianca. La lookahead copre anche const/let/var/class, non solo function.
+$src = $src -replace '(?m)^export\s+(?=(function|const|let|var|class)\b)', ''
 
 $prelude = @"
 const { useState, useRef, useMemo, useEffect, useCallback } = React;

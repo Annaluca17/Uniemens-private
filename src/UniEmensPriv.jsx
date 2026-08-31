@@ -35,13 +35,16 @@ export function giorniMese(annoMese) {
 const TIPO_Q1=[{v:"1",l:"1 – Operaio"},{v:"2",l:"2 – Impiegato"},{v:"5",l:"5 – Apprendista"}];
 const TIPO_Q2=[{v:"F",l:"F – Full time"},{v:"P",l:"P – Part-time orizz."},{v:"V",l:"V – Part-time vert."},{v:"M",l:"M – Part-time misto"}];
 const TIPO_Q3=[{v:"D",l:"D – Dipendente"},{v:"I",l:"I – Intermittente"}];
-const TIPO_CONTRIB=[{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"},{v:"71",l:"71"}];
+/* Il vuoto e' una scelta legittima: TipoContribuzione e' facoltativo e senza valore
+   il tag non viene emesso. Va in lista esplicitamente, altrimenti una volta scelto
+   un codice non c'e' piu' modo di tornare indietro. */
+export const TIPO_CONTRIB=[{v:"",l:"— non impostato (tag omesso)"},{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"},{v:"71",l:"71"}];
 const TIPO_LAV=[{v:"00",l:"00 – Standard"},{v:"PB",l:"PB – Borsa lavoro"}];
 const TIPO_LAVSTAT=[{v:"",l:"— standard"},{v:"NR00",l:"NR00 – Non retribuito"},{v:"NFOR",l:"NFOR – Non formale"}];
 const TIPO_PAGA=[{v:"H",l:"H – Orario"},{v:"M",l:"M – Mensile"}];
 const TIPO_MENS=[{v:"12000",l:"12 mensilità"},{v:"13000",l:"13 mensilità"},{v:"14000",l:"14 mensilità"}];
 const TIPO_CESS=[{v:"1B",l:"1B – Fine TD"},{v:"1C",l:"1C – Fine TD (cantiere)"},{v:"3",l:"3 – Dimissioni"}];
-const TIPO_ASSUN=[{v:"1",l:"1 – Prima assunzione"}];
+export const TIPO_ASSUN=[{v:"1",l:"1 – Prima assunzione"},{v:"9",l:"9 – Altre motivazioni"}];
 const TIPO_MITT=[{v:"1",l:"1 – Azienda"},{v:"2",l:"2 – Persona fisica/Consulente"}];
 const SI_NO=[{v:"S",l:"S"},{v:"N",l:"N"}];
 const SI_NO_EMPTY=[{v:"",l:"—"},{v:"S",l:"S"},{v:"N",l:"N"}];
