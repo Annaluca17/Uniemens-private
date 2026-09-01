@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TIPO_CONTRIB, TIPO_ASSUN, buildPrivXML } from './UniEmensPriv.jsx';
+import { TIPO_CONTRIB, TIPO_ASSUN, TIPO_PAGA, TIPO_RETR_MAL, buildPrivXML } from './UniEmensPriv.jsx';
 
 /* Anagrafica fittizia: qui contano i tag emessi, non chi sia il lavoratore. */
 const lav = (patch) => ({
@@ -71,5 +71,27 @@ describe('TipoAssunzione: codice 9 - Altre motivazioni', () => {
 
   it('senza blocco assunzione non compare', () => {
     expect(xmlDi({ hasAssunzione: false, TipoAssunzione: '9' })).not.toContain('<TipoAssunzione>');
+  });
+});
+
+describe.each([
+  ['TipoPaga', TIPO_PAGA, 'TipoPaga', 'M', ['H', 'M']],
+  ['TipoRetrMal', TIPO_RETR_MAL, 'TipoRetrMal', '2', ['1', '2']],
+])('%s si puo lasciare non impostato', (nome, lista, tag, codice, codiciAttesi) => {
+  it('la lista offre il vuoto, in cima', () => {
+    expect(lista[0].v).toBe('');
+  });
+
+  it('col vuoto il tag non viene emesso', () => {
+    expect(xmlDi({ [nome]: '' })).not.toContain(`<${tag}>`);
+  });
+
+  it('con un codice il tag torna', () => {
+    expect(xmlDi({ [nome]: codice })).toContain(`<${tag}>${codice}</${tag}>`);
+  });
+
+  it('i codici gia in uso restano tutti disponibili', () => {
+    const codici = lista.map(o => o.v);
+    for (const c of codiciAttesi) expect(codici).toContain(c);
   });
 });
