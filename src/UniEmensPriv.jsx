@@ -39,7 +39,7 @@ const TIPO_Q3=[{v:"D",l:"D – Dipendente"},{v:"I",l:"I – Intermittente"}];
    il tag non viene emesso. Va in lista esplicitamente, altrimenti una volta scelto
    un codice non c'e' piu' modo di tornare indietro. */
 export const TIPO_CONTRIB=[{v:"",l:"— non impostato (tag omesso)"},{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"},{v:"71",l:"71"}];
-const TIPO_LAV=[{v:"00",l:"00 – Standard"},{v:"PB",l:"PB – Borsa lavoro"}];
+export const TIPO_LAV=[{v:"",l:"— non impostato (tag omesso)"},{v:"00",l:"00 – Standard"},{v:"PB",l:"PB – Borsa lavoro"}];
 const TIPO_LAVSTAT=[{v:"",l:"— standard"},{v:"NR00",l:"NR00 – Non retribuito"},{v:"NFOR",l:"NFOR – Non formale"}];
 export const TIPO_PAGA=[{v:"",l:"— non impostato (tag omesso)"},{v:"H",l:"H – Orario"},{v:"M",l:"M – Mensile"}];
 const TIPO_MENS=[{v:"12000",l:"12 mensilità"},{v:"13000",l:"13 mensilità"},{v:"14000",l:"14 mensilità"}];
