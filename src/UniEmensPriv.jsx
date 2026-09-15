@@ -98,6 +98,7 @@ const mkLav = (annoMese="") => ({
   DifferenzeAccredito:[],
   hasMaternita:false, IndMat1Fascia:"", IndMat2Fascia:"",
   BaseCalcoloTFR:"", BaseCalcoloPrevCompl:"",
+  TFR:"",
   hasDestinazioneTFR:false,
   DestTFR_TipoScelta:"T2", DestTFR_DataScelta:"",
   DestTFR_IscrizPrevObbl:"", DestTFR_IscrizPrevCompl:"NO",
@@ -748,6 +749,8 @@ function parsePrivXML(xmlStr) {
           }
         }
 
+        lav.TFR = childTxt(diEl, "TFR");
+
         const tfrEl = diEl.querySelector(":scope > GestioneTFR");
         if (tfrEl) {
           const meseEl = tfrEl.querySelector(":scope > MeseTFR");
@@ -1006,6 +1009,11 @@ export function buildPrivXML(cfg, aziende) {
         }
 
         x += `        </DatiRetributivi>\n`;
+
+        /* <TFR>: TFR accantonato in azienda maturato al 31/12 dell'anno prima. Solo nella
+           denuncia di febbraio, dove INPS lo pretende per ogni lavoratore in forza
+           (errore 00940E): chi non ne ha espone 0. */
+        if (/-02$/.test(az.AnnoMese)) x += `        <TFR>${esc(lav.TFR || "0")}</TFR>\n`;
 
         /* GestioneTFR solo se c'è davvero un dato TFR: emetterla sempre aggiungeva
            un BaseCalcoloTFR 0,00 inventato ai tracciati che non la prevedono. */
@@ -2113,6 +2121,7 @@ function renderLavForm(az, pos, lav, lavTab, setLavTab, updateLav, duplicateLav)
             <div style={C.row}>
               <F label="Base Calcolo TFR" value={lav.BaseCalcoloTFR} onChange={v=>upd({BaseCalcoloTFR:v})} w="160px"/>
               <F label="Base Calcolo Prev. Compl." value={lav.BaseCalcoloPrevCompl} onChange={v=>upd({BaseCalcoloPrevCompl:v})} w="180px"/>
+              <F label="TFR al 31/12 (solo febbraio)" value={lav.TFR} onChange={v=>upd({TFR:v})} w="180px"/>
             </div>
             <div style={{marginTop:"10px",padding:"10px",background:"#F8FAFC",borderRadius:"6px"}}>
               <label style={{display:"flex",alignItems:"center",gap:"6px",fontSize:"12px",fontWeight:"600",marginBottom:"10px"}}>

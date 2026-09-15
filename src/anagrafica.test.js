@@ -21,10 +21,10 @@ const lav = (patch) => ({
   ...patch,
 });
 
-const xmlDi = (patch) => buildPrivXML(
+const xmlDi = (patch, annoMese = '2026-03') => buildPrivXML(
   { TipoMittente: '1', CFMittente: '00000000000', RagSocMittente: 'PROVA',
     CFPersonaMittente: '', CFSoftwarehouse: '', SedeINPS: '' },
-  [{ id: 'A1', AnnoMese: '2026-03', CFAzienda: '00000000000', RagSocAzienda: 'PROVA',
+  [{ id: 'A1', AnnoMese: annoMese, CFAzienda: '00000000000', RagSocAzienda: 'PROVA',
      CAP: '', ISTAT: '', collaboratori: [],
      poss: [{ id: 'P1', Matricola: '1234567890', TrattQuotaLav: 'S', ForzaAziendale: '1',
               AltrePartiteADebito: [], lavoratori: [lav(patch)] }] }],
@@ -94,5 +94,25 @@ describe.each([
   it('i codici gia in uso restano tutti disponibili', () => {
     const codici = lista.map(o => o.v);
     for (const c of codiciAttesi) expect(codici).toContain(c);
+  });
+});
+
+describe('TFR maturato al 31/12: obbligatorio a febbraio (00940E)', () => {
+  it('a febbraio senza valore esce 0', () => {
+    expect(xmlDi({}, '2020-02')).toContain('<TFR>0</TFR>');
+  });
+
+  it('a febbraio il valore indicato passa', () => {
+    expect(xmlDi({ TFR: '1234' }, '2020-02')).toContain('<TFR>1234</TFR>');
+  });
+
+  it('sta fra DatiRetributivi e GestioneTFR', () => {
+    const x = xmlDi({ BaseCalcoloTFR: '100,00' }, '2020-02');
+    expect(x.indexOf('</DatiRetributivi>')).toBeLessThan(x.indexOf('<TFR>'));
+    expect(x.indexOf('<TFR>')).toBeLessThan(x.indexOf('<GestioneTFR>'));
+  });
+
+  it('negli altri mesi non compare', () => {
+    expect(xmlDi({ TFR: '1234' }, '2020-03')).not.toContain('<TFR>');
   });
 });
