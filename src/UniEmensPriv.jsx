@@ -116,7 +116,7 @@ const mkPos = () => ({
 });
 const mkCollab = () => ({
   id: uid(), CFCollaboratore:"", Cognome:"", Nome:"",
-  CodiceComune:"", TipoRapporto:"1E",
+  CodiceComune:"", TipoRapporto:"1E", CodiceAttivita:"",
   Imponibile:"", Aliquota:"", AltraAss:"",
   Dal:"", Al:"",
 });
@@ -804,6 +804,7 @@ function parsePrivXML(xmlStr) {
           Nome: childTxt(cEl, "Nome"),
           CodiceComune: childTxt(cEl, "CodiceComune"),
           TipoRapporto: childTxt(cEl, "TipoRapporto") || "1E",
+          CodiceAttivita: childTxt(cEl, "CodiceAttivita"),
           Imponibile: childTxt(cEl, "Imponibile"),
           Aliquota: childTxt(cEl, "Aliquota"),
           AltraAss: childTxt(cEl, "AltraAss"),
@@ -1084,6 +1085,7 @@ export function buildPrivXML(cfg, aziende) {
         x += `        <Nome>${esc(c.Nome)}</Nome>\n`;
         if (c.CodiceComune) x += `        <CodiceComune>${esc(c.CodiceComune)}</CodiceComune>\n`;
         x += `        <TipoRapporto>${esc(c.TipoRapporto || "1E")}</TipoRapporto>\n`;
+        if (c.CodiceAttivita) x += `        <CodiceAttivita>${esc(c.CodiceAttivita)}</CodiceAttivita>\n`;
         if (c.Imponibile) x += `        <Imponibile>${esc(c.Imponibile)}</Imponibile>\n`;
         if (c.Aliquota) x += `        <Aliquota>${esc(c.Aliquota)}</Aliquota>\n`;
         if (c.AltraAss) x += `        <AltraAss>${esc(c.AltraAss)}</AltraAss>\n`;
@@ -1885,6 +1887,7 @@ function renderCollabForm(az, c, updateCollab) {
       <div style={C.row}>
         <F label="Codice Comune" value={c.CodiceComune} onChange={v=>updateCollab(az.id, c.id, {CodiceComune:v})} w="120px"/>
         <F label="Tipo Rapporto" value={c.TipoRapporto} onChange={v=>updateCollab(az.id, c.id, {TipoRapporto:v})} opts={TIPO_RAPPORTO} w="160px"/>
+        <F label="Codice Attività" value={c.CodiceAttivita} onChange={v=>updateCollab(az.id, c.id, {CodiceAttivita:v})} w="120px"/>
       </div>
       <div style={C.row}>
         <F label="Imponibile" value={c.Imponibile} onChange={v=>updateCollab(az.id, c.id, {Imponibile:v})} w="140px"/>
