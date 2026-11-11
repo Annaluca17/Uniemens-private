@@ -1214,9 +1214,43 @@ export function parsePeriodi(testo) {
     }
     const aliquota = celle[2] ? parseIt(celle[2]) : 1.61;
     const giorniRetr = celle[3] ? String(Math.round(parseIt(celle[3]))) : "26";
-    out.push({ n: i + 1, AnnoMese: am, imponibile, aliquota, GiorniRetribuiti: giorniRetr, giorniDefault: !celle[3] });
+    out.push({
+      n: i + 1, AnnoMese: am, imponibile, aliquota, GiorniRetribuiti: giorniRetr, giorniDefault: !celle[3],
+      // colonne facoltative: senza codice fiscale la riga è del lavoratore modello
+      cf: (celle[4] || "").toUpperCase().replace(/\s/g, ""), cognome: celle[5] || "", nome: celle[6] || "",
+    });
   });
   return out;
+}
+
+/* Il gestionale dà il nominativo in un campo solo ("DE CARIA GIUSEPPE", cognome prima).
+   Dove finisce il cognome lo dice il codice fiscale: si prova ogni taglio e si tiene
+   quello le cui prime sei lettere tornano. Se nessuno torna, l'ultima parola è il nome
+   e `certo` resta falso: lo si corregge a mano. */
+const consVoc = (t) => { const u = t.toUpperCase().replace(/[^A-Z]/g, ""); return [u.replace(/[AEIOU]/g, ""), u.replace(/[^AEIOU]/g, "")]; };
+const cfCognome = (t) => { const [c, v] = consVoc(t); return (c + v + "XXX").slice(0, 3); };
+const cfNome = (t) => { const [c, v] = consVoc(t); return c.length >= 4 ? c[0] + c[2] + c[3] : (c + v + "XXX").slice(0, 3); };
+export function dividiNominativo(nominativo, cf) {
+  const p = String(nominativo || "").trim().split(/\s+/).filter(Boolean);
+  if (p.length < 2) return { cognome: p[0] || "", nome: "", certo: false };
+  const sei = String(cf || "").slice(0, 6).toUpperCase();
+  for (let i = 1; i < p.length; i++) {
+    const cognome = p.slice(0, i).join(" "), nome = p.slice(i).join(" ");
+    if (sei.length === 6 && cfCognome(cognome) + cfNome(nome) === sei) return { cognome, nome, certo: true };
+  }
+  return { cognome: p.slice(0, -1).join(" "), nome: p[p.length - 1], certo: false };
+}
+
+/* Un flusso per mese con dentro tutti i lavoratori di quel mese, come una denuncia
+   ordinaria. Ogni esito porta la sua azienda con un solo lavoratore: qui si fondono. */
+export function flussiPerMese(esiti) {
+  const mesi = new Map();
+  esiti.forEach(e => {
+    const am = e.az.AnnoMese, f = mesi.get(am);
+    if (f) f.az.poss[0].lavoratori.push(e.lav);
+    else mesi.set(am, { AnnoMese: am, nome: e.nome, az: { ...e.az, poss: [{ ...e.az.poss[0], lavoratori: [e.lav] }] } });
+  });
+  return [...mesi.values()].sort((a, b) => a.AnnoMese.localeCompare(b.AnnoMese));
 }
 
 /* ═══ ESTRAZIONE VOCI (Halley) → righe dell'import periodi ═══
@@ -1289,7 +1323,7 @@ export function periodiDaEstrazione(persona, voce) {
     }
     if (m.tipo && !/TD/i.test(m.tipo)) { nonTD.push(am); a.push(`tipo rapporto ${m.tipo}: non a tempo determinato`); }
     if (a.length) avvisi[am] = a;
-    righe.push([am, imp.toFixed(2).replace(".", ","), "", gg > 0 ? String(gg) : ""].join("\t").trimEnd());
+    righe.push([am, imp.toFixed(2).replace(".", ","), "", gg > 0 ? String(gg) : "", persona.cf].join("\t"));
   });
   return { testo: righe.join("\n"), avvisi, nonTD };
 }
@@ -1368,8 +1402,9 @@ export default function UniEmensPriv() {
   const [periodiEsclusi, setPeriodiEsclusi] = useState({});   // { "2021-03": true }
   const [periodiDa, setPeriodiDa] = useState("");
   const [periodiA, setPeriodiA] = useState("");
-  const [rapAss, setRapAss] = useState("");                   // AAAA-MM-GG
-  const [rapCess, setRapCess] = useState("");
+  /* Per persona (chiave = CF, "" = lavoratore modello): { cognome, nome, ass, cess, off },
+     con ass/cess come date AAAA-MM-GG. Solo quel che è stato toccato a mano. */
+  const [periodiPersone, setPeriodiPersone] = useState({});
   const [halley, setHalley] = useState(null);                 // { file, persone }
   const [halleyCf, setHalleyCf] = useState("");
   const [halleyVoce, setHalleyVoce] = useState("");
@@ -1568,51 +1603,111 @@ export default function UniEmensPriv() {
 
   /* ── Import massivo periodi ── */
   /* Il modello e' il lavoratore selezionato, o il primo che si trova: da li' arrivano
-     anagrafica, qualifiche, matricola e frontespizio. L'incolla porta solo i valori
-     che cambiano di mese in mese. */
+     qualifiche, contratto, matricola e frontespizio. Per chi non e' ancora nel builder
+     fa da profilo standard: cambiano solo codice fiscale e nominativo. */
   const azModello = selAz || aziende[0] || null;
   const posModello = selPos || azModello?.poss[0] || null;
   const lavModello = selLav || posModello?.lavoratori[0] || null;
+  const cfModello = String(lavModello?.CFLavoratore || "").toUpperCase();
+
+  const scarica = (blob, nome) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = nome;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   const righePeriodi = periodiOpen ? parsePeriodi(periodiTesto) : [];
   const daAM = normalizzaAnnoMese(periodiDa), aAM = normalizzaAnnoMese(periodiA);
-  const esitiPeriodi = (periodiOpen && lavModello && azModello && posModello)
+
+  /* Le persone delle righe. Il nominativo viene, nell'ordine: da quel che e' stato scritto
+     a mano, dalle colonne dell'incolla, dal lavoratore gia' nel builder, dall'estrazione. */
+  const lavPerCf = {};
+  if (periodiOpen) aziende.forEach(a => a.poss.forEach(p => p.lavoratori.forEach(l => {
+    const k = String(l.CFLavoratore || "").toUpperCase();
+    if (k && !lavPerCf[k]) lavPerCf[k] = l;
+  })));
+  const personePeriodi = [], perChiave = {};
+  righePeriodi.forEach(r => {
+    if (r.errore) return;
+    const k = r.cf || "";
+    if (perChiave[k]) { perChiave[k].mesi.push(r.AnnoMese); return; }
+    const st = periodiPersone[k] || {};
+    const noto = k ? lavPerCf[k] : lavModello;
+    const hp = k ? halley?.persone.find(p => p.cf === k) : null;
+    const div = hp ? dividiNominativo(hp.nome, k) : null;
+    const pers = perChiave[k] = {
+      k, cf: k || cfModello, daModello: !k, nuovo: !!k && !noto, base: noto || lavModello,
+      cognome: st.cognome ?? (r.cognome || noto?.Cognome || div?.cognome || ""),
+      nome: st.nome ?? (r.nome || noto?.Nome || div?.nome || ""),
+      incerto: st.cognome == null && st.nome == null && !r.cognome && !noto && !!div && !div.certo,
+      ass: st.ass || "", cess: st.cess || "", off: !!st.off, mesi: [r.AnnoMese],
+    };
+    personePeriodi.push(pers);
+  });
+  const setPers = (k, patch) => setPeriodiPersone(s => ({ ...s, [k]: { ...s[k], ...patch } }));
+  const chiaveRiga = (r) => `${r.AnnoMese}|${r.cf || ""}`;
+
+  const esitiPeriodi = (periodiOpen && azModello && posModello)
     ? righePeriodi.map(r => {
         if (r.errore) return { riga: r, errore: r.errore };
-        const e = costruisciPeriodo(cfg, azModello, posModello, lavModello, r,
-                                    { assunzione: rapAss, cessazione: rapCess });
-        (halleyAvvisi[r.AnnoMese] || []).forEach(msg => e.voci.push({ liv: "W", msg }));
-        /* Le mensilità da creare: dentro il rapporto, dentro l'intervallo, con la spunta. */
-        e.escluso = e.fuori ? "fuori dal rapporto di lavoro"
+        const pers = perChiave[r.cf || ""];
+        if (!pers.base) return { riga: r, pers, errore: "manca un lavoratore tipo da cui prendere qualifiche e contratto" };
+        /* Chi non e' nel builder copia il profilo dal modello, ma non la sua assunzione
+           o cessazione: quelle sono di un'altra persona. */
+        const base = pers.daModello ? pers.base
+          : pers.nuovo ? { ...pers.base, CFLavoratore: pers.cf, Cognome: pers.cognome, Nome: pers.nome,
+                           hasAssunzione: false, GiornoAssunzione: "", hasCessazione: false, GiornoCessazione: "" }
+          : { ...pers.base, Cognome: pers.cognome, Nome: pers.nome };
+        const e = costruisciPeriodo(cfg, azModello, posModello, base, r,
+                                    { assunzione: pers.ass, cessazione: pers.cess });
+        e.pers = pers;
+        (halleyAvvisi[chiaveRiga(r)] || []).forEach(msg => e.voci.push({ liv: "W", msg }));
+        /* Le mensilità da creare: persona inclusa, dentro il rapporto, dentro l'intervallo, con la spunta. */
+        e.escluso = pers.off ? "persona esclusa"
+          : e.fuori ? "fuori dal rapporto di lavoro"
           : ((daAM && r.AnnoMese < daAM) || (aAM && r.AnnoMese > aAM)) ? "fuori dall'intervallo scelto"
-          : periodiEsclusi[r.AnnoMese] ? "escluso a mano" : "";
+          : periodiEsclusi[chiaveRiga(r)] ? "escluso a mano" : "";
         return e;
       })
     : [];
-  /* Due righe sullo stesso mese produrrebbero due voci con lo stesso nome dentro lo ZIP. */
+  /* La stessa persona due volte nello stesso mese finirebbe due volte nella denuncia. */
   const visti = {};
   esitiPeriodi.forEach(e => {
     if (e.errore) return;
-    const k = e.az.AnnoMese;
+    const k = chiaveRiga(e.riga);
     if (visti[k]) e.duplicato = true; else visti[k] = true;
   });
   const periodiBloccanti = esitiPeriodi.filter(
     e => !e.escluso && (e.errore || e.duplicato || (e.voci || []).some(v => v.liv === "E"))
   ).length;
   const periodiInclusi = esitiPeriodi.filter(e => !e.escluso).length;
+  const flussiPeriodi = flussiPerMese(esitiPeriodi.filter(e => !e.errore && !e.duplicato && !e.escluso));
 
   /* ── Estrazione voci Halley: riempie l'incolla, non genera nulla da sé ── */
-  const halleyPersona = halley?.persone.find(p => p.cf === halleyCf) || null;
-  const halleyMesi = halleyPersona ? Object.keys(halleyPersona.mesi).sort() : [];
+  const eTD = (p) => Object.values(p.mesi).some(m => /TD/i.test(m.tipo));
+  const halleyScelte = !halley ? [] : halleyCf ? halley.persone.filter(p => p.cf === halleyCf) : halley.persone.filter(eTD);
+  const vociScelte = (persone) => {
+    const out = {};
+    persone.forEach(p => vociImponibile(p).forEach(v => { out[v.cod] = v.descr; }));
+    return Object.keys(out).sort((a, b) => a - b).map(cod => ({ cod, descr: out[cod] }));
+  };
+  /* cf "" = tutti i dipendenti a tempo determinato dell'estrazione */
   const applicaHalley = (dati, cf, voce) => {
-    const p = dati.persone.find(x => x.cf === cf);
-    if (!p) return;
-    const voci = vociImponibile(p).map(v => v.cod);
+    const persone = cf ? dati.persone.filter(p => p.cf === cf) : dati.persone.filter(eTD);
+    if (!persone.length) return;
+    const voci = vociScelte(persone).map(v => v.cod);
     const v = voci.includes(voce) ? voce : (["8103", "8118"].find(c => voci.includes(c)) || voci[0] || "");
-    const r = periodiDaEstrazione(p, v);
+    const righe = [], avvisi = {}, esclusi = {};
+    persone.forEach(p => {
+      const r = periodiDaEstrazione(p, v);
+      if (r.testo) righe.push(r.testo);
+      Object.entries(r.avvisi).forEach(([am, a]) => { avvisi[`${am}|${p.cf}`] = a; });
+      r.nonTD.forEach(am => { esclusi[`${am}|${p.cf}`] = true; });
+    });
     setHalleyCf(cf); setHalleyVoce(v);
-    setPeriodiTesto(r.testo); setHalleyAvvisi(r.avvisi);
-    setPeriodiEsclusi(Object.fromEntries(r.nonTD.map(am => [am, true])));
+    setPeriodiTesto(righe.join("\n")); setHalleyAvvisi(avvisi); setPeriodiEsclusi(esclusi);
   };
   const caricaHalley = (file) => {
     const reader = new FileReader();
@@ -1621,10 +1716,7 @@ export default function UniEmensPriv() {
         const dati = { file: file.name, ...leggiEstrazioneVoci(ev.target.result) };
         if (!dati.persone.length) throw new Error("nessuna riga con codice fiscale e voce");
         setHalley(dati);
-        const mio = dati.persone.find(p => p.cf === String(lavModello?.CFLavoratore || "").toUpperCase());
-        // senza il lavoratore modello in estrazione, si parte dal primo a tempo determinato
-        const td = dati.persone.find(p => Object.values(p.mesi).some(m => /TD/i.test(m.tipo)));
-        applicaHalley(dati, (mio || td || dati.persone[0]).cf, "");
+        applicaHalley(dati, dati.persone.some(eTD) ? "" : dati.persone[0].cf, "");
       } catch (err) {
         alert("Estrazione voci non letta:\n" + err.message);
       }
@@ -1633,18 +1725,41 @@ export default function UniEmensPriv() {
   };
 
   const generaPeriodi = (forza) => {
-    const buoni = esitiPeriodi.filter(e => !e.errore && !e.duplicato && !e.escluso);
-    if (!buoni.length) return;
+    if (!flussiPeriodi.length) return;
     if (periodiBloccanti && !forza) return;
-    const files = buoni.map(e => ({ name: e.nome, text: buildPrivXML(cfg, [e.az]) }));
-    const mesi = buoni.map(e => e.az.AnnoMese).sort();
-    const cognome = (lavModello.Cognome || "UNIEMENS").replace(/[^A-Za-z0-9]/g, "");
-    const nomeZip = `UNIEMENS_${cognome}_${mesi[0]}_${mesi[mesi.length - 1]}.zip`;
-    const url = URL.createObjectURL(zipStore(files));
-    const a = document.createElement("a");
-    a.href = url; a.download = nomeZip;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const files = flussiPeriodi.map(f => ({ name: f.nome, text: buildPrivXML(cfg, [f.az]) }));
+    const attive = personePeriodi.filter(x => !x.off);
+    const chi = attive.length === 1 ? (attive[0].cognome || "UNIEMENS").replace(/[^A-Za-z0-9]/g, "") : `${attive.length}DIP`;
+    scarica(zipStore(files), `UNIEMENS_${chi}_${flussiPeriodi[0].AnnoMese}_${flussiPeriodi[flussiPeriodi.length - 1].AnnoMese}.zip`);
+  };
+
+  /* I mesi generati entrano nell'albero come denunce, da aprire e correggere campo per
+     campo. L'azienda modello senza mese era solo lo stampo: esce di scena. */
+  const caricaNelBuilder = () => {
+    if (!flussiPeriodi.length) return;
+    const gia = flussiPeriodi.filter(f => aziende.some(a => a.AnnoMese === f.AnnoMese)).map(f => f.AnnoMese);
+    if (gia.length && !confirm(`Nel builder ci sono già denunce per ${gia.join(", ")}.\nAggiungere comunque? Quei mesi compariranno due volte.`)) return;
+    const nuove = flussiPeriodi.map(f => f.az);
+    const stampo = azModello && !azModello.AnnoMese ? azModello.id : null;
+    setAziende(arr => [...arr.filter(a => a.id !== stampo), ...nuove]);
+    setXAz(nuove[0].id); setXPos(null); setXLav(null); setXCollab(null);
+    setPeriodiOpen(false);
+  };
+
+  /* ── Export di più mesi: un file per mese dentro uno ZIP ── */
+  const mesiBuilder = [...new Set(aziende.map(a => a.AnnoMese).filter(Boolean))].sort();
+  const handleExportZip = () => {
+    const err = validaTutto(cfg, aziende).filter(x => x.liv === "E");
+    if (err.length) {
+      const elenco = err.slice(0, 15).map(x => `• [${x.dove}] ${x.msg}`).join("\n");
+      const extra = err.length > 15 ? `\n…e altri ${err.length - 15}.` : "";
+      if (!confirm(`${err.length} quadri obbligatori incompleti: INPS scarterà i flussi.\n\n${elenco}${extra}\n\nEsportare comunque?`)) return;
+    }
+    const files = mesiBuilder.map(am => {
+      const gruppo = aziende.filter(a => a.AnnoMese === am);
+      return { name: exportFilename(cfg, gruppo), text: buildPrivXML(cfg, gruppo) };
+    });
+    scarica(zipStore(files), `UNIEMENS_${mesiBuilder[0]}_${mesiBuilder[mesiBuilder.length - 1]}.zip`);
   };
 
   /* ─────────── RENDER ─────────── */
@@ -1668,10 +1783,15 @@ export default function UniEmensPriv() {
         <button style={C.btn("d")} onClick={()=> selAz && addCollab(selAz.id)} disabled={!selAz}>+ Collab.</button>
         <div style={{flex:1}}/>
         <button style={C.btn("i")} onClick={()=> fileRef.current?.click()}>Importa XML</button>
-        <button style={C.btn("i")} onClick={()=> setPeriodiOpen(true)} disabled={!lavModello}
-                title={lavModello ? "Genera un flusso per ogni mese incollato" : "Serve prima un lavoratore caricato, da cui prendere anagrafica e struttura"}>
+        <button style={C.btn("i")} onClick={()=> setPeriodiOpen(true)}
+                title="Genera un flusso per ogni mese, da incolla o da Estrazione voci">
           Import periodi
         </button>
+        {mesiBuilder.length > 1 && (
+          <button style={C.btn("s")} onClick={handleExportZip} title="Uno ZIP con un file XML per ogni mese presente">
+            Esporta ZIP per mese
+          </button>
+        )}
         <input type="file" accept=".xml" ref={fileRef} style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0]; if(f) handleImport(f); e.target.value="";}}/>
         <button style={C.btn("s")} onClick={handleExport}>Esporta XML</button>
         <button style={C.btn("x")} onClick={reset}>Reset</button>
@@ -1773,15 +1893,20 @@ export default function UniEmensPriv() {
       {/* Modal: import massivo periodi */}
       {periodiOpen && (
         <div style={C.modal} onClick={()=>setPeriodiOpen(false)}>
-          <div style={{...C.modalBox, maxWidth:"920px", width:"92vw"}} onClick={e=>e.stopPropagation()}>
-            <h3 style={{margin:"0 0 4px",color:"#0369A1"}}>Import periodi — una persona, molti mesi</h3>
+          <div style={{...C.modalBox, maxWidth:"1080px", width:"94vw", maxHeight:"92vh"}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{margin:"0 0 4px",color:"#0369A1"}}>Import periodi — un flusso per mese</h3>
             <div style={{fontSize:"11px",color:"#6A7282",marginBottom:"10px",lineHeight:"1.6"}}>
-              Anagrafica, qualifiche, matricola e frontespizio vengono da <b>{lavModello?.Cognome} {lavModello?.Nome}</b>.
-              Dall&apos;incolla arrivano solo i valori che cambiano.<br/>
-              Colonne: <b>Mese</b> · <b>Imponibile</b> · <b>Aliquota %</b> (default 1,61) · <b>Giorni retribuiti</b> (default 26).
-              Seleziona l&apos;intervallo in Excel e incolla: il TAB fa da separatore, la virgola resta il decimale.
-              L&apos;imponibile scrivilo <b>coi centesimi</b> — nell&apos;XML ci va intero, ma il contributo si calcola sul valore reale.
-              I giorni sono da calendario, lun-sab lavorati.
+              Colonne: <b>Mese</b> · <b>Imponibile</b> · <b>Aliquota %</b> (default 1,61) · <b>Giorni retribuiti</b> (default 26)
+              · <b>Codice fiscale</b> · <b>Cognome</b> · <b>Nome</b> (le ultime tre facoltative).
+              Incolla da Excel: il TAB fa da separatore, la virgola resta il decimale. L&apos;imponibile va <b>coi centesimi</b>:
+              nell&apos;XML ci va intero, ma il contributo si calcola sul valore reale. I giorni sono da calendario, lun-sab lavorati.<br/>
+              {lavModello
+                ? <>Frontespizio, matricola, qualifiche e contratto vengono da <b>{lavModello.Cognome || "(senza cognome)"} {lavModello.Nome}</b>:
+                    una riga senza codice fiscale è sua, una con un codice fiscale nuovo ne copia il profilo.</>
+                : <span style={{color:"#991B1B",fontWeight:"700"}}>
+                    Manca il lavoratore tipo. Chiudi, compila Dati Mittente, azienda e matricola, poi «+ Lavoratore» con qualifiche e
+                    contratto: farà da profilo per tutti i dipendenti di questo import.
+                  </span>}
             </div>
             {/* Estrazione voci Halley: riempie la tabella qui sotto, che resta modificabile */}
             <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap",marginBottom:"8px",fontSize:"12px"}}>
@@ -1791,6 +1916,7 @@ export default function UniEmensPriv() {
               {halley && <>
                 <select value={halleyCf} onChange={e=>applicaHalley(halley, e.target.value, halleyVoce)}
                         style={{padding:"5px",border:"1px solid #CBD5E1",borderRadius:"6px",fontSize:"12px"}}>
+                  {halley.persone.some(eTD) && <option value="">Tutti i tempo determinato ({halley.persone.filter(eTD).length})</option>}
                   {halley.persone.map(p => {
                     const tipi = [...new Set(Object.values(p.mesi).map(m => m.tipo.replace(/^\d+-/, "")).filter(Boolean))].join("/");
                     return <option key={p.cf} value={p.cf}>{p.nome} · {p.cf}{tipi ? ` · ${tipi}` : ""}</option>;
@@ -1799,57 +1925,86 @@ export default function UniEmensPriv() {
                 <span>imponibile da</span>
                 <select value={halleyVoce} onChange={e=>applicaHalley(halley, halleyCf, e.target.value)}
                         style={{padding:"5px",border:"1px solid #CBD5E1",borderRadius:"6px",fontSize:"12px"}}>
-                  {(halleyPersona ? vociImponibile(halleyPersona) : []).map(v =>
-                    <option key={v.cod} value={v.cod}>{v.cod} – {v.descr}</option>)}
+                  {vociScelte(halleyScelte).map(v => <option key={v.cod} value={v.cod}>{v.cod} – {v.descr}</option>)}
                 </select>
               </>}
             </div>
-            {halleyPersona && (
-              <div style={{fontSize:"11px",color:"#6A7282",marginBottom:"8px",lineHeight:"1.6"}}>
-                In estrazione <b>{halleyPersona.nome}</b> ha cedolini da <b>{halleyMesi[0]}</b> a <b>{halleyMesi[halleyMesi.length-1]}</b> ({halleyMesi.length} mesi).
-                L&apos;estrazione non riporta le date di assunzione e cessazione: indicale qui sotto.
-                {halleyCf !== String(lavModello?.CFLavoratore || "").toUpperCase() && (
-                  <div style={{color:"#991B1B",fontWeight:"700"}}>
-                    Attenzione: nei flussi l&apos;anagrafica sarà quella di {lavModello?.Cognome} {lavModello?.Nome} ({lavModello?.CFLavoratore || "senza CF"}),
-                    non di {halleyPersona.nome}. Chiudi e seleziona prima il suo lavoratore.
-                  </div>
-                )}
-              </div>
-            )}
             <textarea
               value={periodiTesto}
               onChange={e=>setPeriodiTesto(e.target.value)}
-              placeholder={"2020-12\t1062,61\n2021-01\t950,09\n2021-02\t950,09\t1,61\t26"}
-              style={{width:"100%",height:"110px",fontFamily:"ui-monospace,Consolas,monospace",fontSize:"12px",
+              placeholder={"2020-12\t1062,61\n2021-01\t950,09\n2021-02\t950,09\t1,61\t26\n2021-02\t800,00\t\t\tRSSMRA80A01H501U\tROSSI\tMARIO"}
+              style={{width:"100%",height:"96px",fontFamily:"ui-monospace,Consolas,monospace",fontSize:"12px",
                       padding:"8px",border:"1px solid #CBD5E1",borderRadius:"6px",resize:"vertical"}}
             />
-            {/* Rapporto di lavoro e mensilità da creare */}
+            {/* Persone: nominativo, assunzione e cessazione */}
+            {personePeriodi.length > 0 && (
+              <div style={{maxHeight:"24vh",overflow:"auto",margin:"10px 0 0",border:"1px solid #E2E8F0",borderRadius:"6px"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"11px"}}>
+                  <thead>
+                    <tr style={{background:"#F1F5F9",position:"sticky",top:0}}>
+                      {["", "Cognome", "Nome", "Codice fiscale", "Profilo", "Cedolini", "Assunzione", "Cessazione"].map((h,i)=>(
+                        <th key={i} style={{padding:"5px 7px",textAlign:"left",fontWeight:"700",borderBottom:"1px solid #E2E8F0"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {personePeriodi.map(x => {
+                      const mesi = [...x.mesi].sort();
+                      const campo = {padding:"3px 5px",border:"1px solid #CBD5E1",borderRadius:"5px",fontSize:"11px"};
+                      return (
+                        <tr key={x.k} style={{color: x.off ? "#94A3B8" : undefined}}>
+                          <td style={{padding:"4px 7px"}}><input type="checkbox" checked={!x.off} onChange={e=>setPers(x.k, {off: !e.target.checked})}/></td>
+                          {x.daModello
+                            ? <><td style={{padding:"4px 7px"}}>{x.cognome}</td><td style={{padding:"4px 7px"}}>{x.nome}</td></>
+                            : <>
+                                <td style={{padding:"4px 7px"}}><input value={x.cognome} onChange={e=>setPers(x.k, {cognome: e.target.value.toUpperCase(), nome: x.nome})}
+                                     style={{...campo, width:"130px", border:`1px solid ${x.incerto || !x.cognome ? "#D97706" : "#CBD5E1"}`}}/></td>
+                                <td style={{padding:"4px 7px"}}><input value={x.nome} onChange={e=>setPers(x.k, {nome: e.target.value.toUpperCase(), cognome: x.cognome})}
+                                     style={{...campo, width:"130px", border:`1px solid ${x.incerto || !x.nome ? "#D97706" : "#CBD5E1"}`}}/></td>
+                              </>}
+                          <td style={{padding:"4px 7px",fontFamily:"ui-monospace,monospace"}}>{x.cf || "—"}</td>
+                          <td style={{padding:"4px 7px"}}>
+                            {x.daModello ? "lavoratore modello" : x.nuovo
+                              ? (x.base ? `nuovo · copia di ${x.base.Cognome || "(modello)"}` : "nuovo · manca il modello")
+                              : "già nel builder"}
+                            {x.incerto && <span style={{color:"#B45309"}}> · controlla cognome e nome</span>}
+                          </td>
+                          <td style={{padding:"4px 7px"}}>{mesi[0]}{mesi.length > 1 ? ` → ${mesi[mesi.length-1]}` : ""} ({mesi.length})</td>
+                          <td style={{padding:"4px 7px"}}><input type="date" value={x.ass} onChange={e=>setPers(x.k, {ass: e.target.value})} style={campo}/></td>
+                          <td style={{padding:"4px 7px"}}>
+                            <input type="date" value={x.cess} onChange={e=>setPers(x.k, {cess: e.target.value})}
+                                   style={{...campo, border:`1px solid ${x.ass && x.cess && x.cess < x.ass ? "#DC2626" : "#CBD5E1"}`}}/>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
             <div style={{display:"flex",gap:"14px",alignItems:"center",flexWrap:"wrap",margin:"8px 0 0",fontSize:"12px"}}>
-              {[["Assunzione", rapAss, setRapAss, "date"], ["Cessazione", rapCess, setRapCess, "date"],
-                ["Crea dal mese", periodiDa, setPeriodiDa, "text"], ["al mese", periodiA, setPeriodiA, "text"]].map(([et, val, set, tipo]) => (
+              {[["Crea dal mese", periodiDa, setPeriodiDa], ["al mese", periodiA, setPeriodiA]].map(([et, val, set]) => (
                 <label key={et} style={{display:"flex",gap:"5px",alignItems:"center"}}>
                   {et}
-                  <input type={tipo} value={val} onChange={e=>set(e.target.value)} placeholder={tipo === "text" ? "2021-01" : undefined}
-                         style={{padding:"4px 6px",border:"1px solid",borderRadius:"6px",fontSize:"12px",width: tipo === "text" ? "82px" : "auto",
-                                 borderColor: tipo === "text" && val && !normalizzaAnnoMese(val) ? "#DC2626" : "#CBD5E1"}}/>
+                  <input type="text" value={val} onChange={e=>set(e.target.value)} placeholder="2021-01"
+                         style={{padding:"4px 6px",border:`1px solid ${val && !normalizzaAnnoMese(val) ? "#DC2626" : "#CBD5E1"}`,borderRadius:"6px",fontSize:"12px",width:"82px"}}/>
                 </label>
               ))}
-              {rapAss && rapCess && rapCess < rapAss && <span style={{color:"#991B1B"}}>la cessazione precede l&apos;assunzione</span>}
-            </div>
-            <div style={{fontSize:"11px",color:"#6A7282",marginTop:"4px"}}>
-              Le date sono facoltative: se le indichi, il quadro Assunzione o Cessazione esce solo nel suo mese (tipo preso dal lavoratore modello)
-              e i mesi fuori dal rapporto non vengono creati. Senza date vale quel che è impostato sul lavoratore.
+              <span style={{fontSize:"11px",color:"#6A7282",flex:1,minWidth:"260px"}}>
+                Assunzione e cessazione sono facoltative e l&apos;estrazione voci non le riporta: se le indichi, il quadro esce solo nel suo
+                mese (tipo preso dal profilo) e i mesi fuori dal rapporto non vengono creati.
+              </span>
             </div>
             {esitiPeriodi.length > 0 && (
-              <div style={{maxHeight:"38vh",overflow:"auto",margin:"10px 0",border:"1px solid #E2E8F0",borderRadius:"6px"}}>
+              <div style={{maxHeight:"34vh",overflow:"auto",margin:"10px 0",border:"1px solid #E2E8F0",borderRadius:"6px"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:"11px"}}>
                   <thead>
                     <tr style={{background:"#F1F5F9",position:"sticky",top:0}}>
                       <th style={{padding:"5px 7px",borderBottom:"1px solid #E2E8F0"}} title="Crea / non creare: tutti o nessuno">
                         <input type="checkbox" checked={!Object.keys(periodiEsclusi).length}
-                               onChange={e=>setPeriodiEsclusi(e.target.checked ? {} : Object.fromEntries(righePeriodi.filter(r=>r.AnnoMese).map(r=>[r.AnnoMese,true])))}/>
+                               onChange={e=>setPeriodiEsclusi(e.target.checked ? {} : Object.fromEntries(righePeriodi.filter(r=>r.AnnoMese).map(r=>[chiaveRiga(r),true])))}/>
                       </th>
-                      {["", "Mese", "File", "Imponibile", "Contributo", "gg retr.", "Ass./Cess.", "Settimane", "Esito"].map((h,i)=>(
+                      {["", "Mese", "Persona", "File", "Imponibile", "Contributo", "gg retr.", "Ass./Cess.", "Settimane", "Esito"].map((h,i)=>(
                         <th key={i} style={{padding:"5px 7px",textAlign:"left",fontWeight:"700",borderBottom:"1px solid #E2E8F0"}}>{h}</th>
                       ))}
                     </tr>
@@ -1858,15 +2013,17 @@ export default function UniEmensPriv() {
                     {esitiPeriodi.map((e, i) => {
                       const gravi = e.errore || e.duplicato || (e.voci || []).some(v => v.liv === "E");
                       const avvisi = (e.voci || []).filter(v => v.liv !== "E");
+                      const k = e.riga.AnnoMese ? chiaveRiga(e.riga) : null;
                       return (
                         <tr key={i} style={{background: e.escluso ? "#F8FAFC" : gravi ? "#FEF2F2" : (avvisi.length ? "#FFFBEB" : "#fff"),
                                             color: e.escluso ? "#94A3B8" : undefined}}>
                           <td style={{padding:"4px 7px"}}>
-                            {!e.errore && <input type="checkbox" checked={!periodiEsclusi[e.az.AnnoMese]}
-                              onChange={ev=>setPeriodiEsclusi(x=>{ const y={...x}; if (ev.target.checked) delete y[e.az.AnnoMese]; else y[e.az.AnnoMese]=true; return y; })}/>}
+                            {k && <input type="checkbox" checked={!periodiEsclusi[k]}
+                              onChange={ev=>setPeriodiEsclusi(x=>{ const y={...x}; if (ev.target.checked) delete y[k]; else y[k]=true; return y; })}/>}
                           </td>
-                          <td style={{padding:"4px 7px"}}>{e.escluso ? "\u2013" : gravi ? "\u2716" : (avvisi.length ? "\u26A0" : "\u2713")}</td>
-                          <td style={{padding:"4px 7px"}}>{e.errore ? (e.riga.AnnoMese || e.riga.grezza) : e.az.AnnoMese}</td>
+                          <td style={{padding:"4px 7px"}}>{e.escluso ? "–" : gravi ? "✖" : (avvisi.length ? "⚠" : "✓")}</td>
+                          <td style={{padding:"4px 7px",whiteSpace:"nowrap"}}>{e.riga.AnnoMese || e.riga.grezza}</td>
+                          <td style={{padding:"4px 7px"}}>{e.pers ? e.pers.cognome || e.pers.cf : ""}</td>
                           <td style={{padding:"4px 7px",fontFamily:"ui-monospace,monospace"}}>{e.nome || ""}</td>
                           <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Imponibile : ""}</td>
                           <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Contributo : ""}</td>
@@ -1876,7 +2033,7 @@ export default function UniEmensPriv() {
                           </td>
                           <td style={{padding:"4px 7px"}}>{(e.setts||[]).map(s=>`${s.IdSettimana}${s.TipoCopertura}`).join(" ")}</td>
                           <td style={{padding:"4px 7px",color: e.escluso ? "#94A3B8" : gravi ? "#991B1B" : "#92400E"}}>
-                            {e.escluso ? `non creato: ${e.escluso}` : e.errore || (e.duplicato ? "mese ripetuto nell'incolla" : (e.voci||[]).map(v=>v.msg).join(" · "))}
+                            {e.escluso ? `non creato: ${e.escluso}` : e.errore || (e.duplicato ? "stessa persona due volte nel mese" : (e.voci||[]).map(v=>v.msg).join(" · "))}
                           </td>
                         </tr>
                       );
@@ -1885,20 +2042,24 @@ export default function UniEmensPriv() {
                 </table>
               </div>
             )}
-            <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap",marginTop:"10px"}}>
               <div style={{fontSize:"12px",flex:1}}>
                 {esitiPeriodi.length
-                  ? <span><b>{periodiInclusi - periodiBloccanti}</b> flussi pronti
-                      {esitiPeriodi.length > periodiInclusi ? <span style={{color:"#6A7282"}}> · {esitiPeriodi.length - periodiInclusi} non creati</span> : null}
+                  ? <span><b>{flussiPeriodi.length}</b> flussi, uno per mese · <b>{periodiInclusi - periodiBloccanti}</b> righe pronte
+                      {esitiPeriodi.length > periodiInclusi ? <span style={{color:"#6A7282"}}> · {esitiPeriodi.length - periodiInclusi} non create</span> : null}
                       {periodiBloccanti ? <span style={{color:"#991B1B"}}> · <b>{periodiBloccanti}</b> da sistemare</span> : null}</span>
-                  : <span style={{color:"#6A7282"}}>Incolla le righe per vedere l&apos;anteprima.</span>}
+                  : <span style={{color:"#6A7282"}}>Incolla le righe o carica un&apos;estrazione voci per vedere l&apos;anteprima.</span>}
               </div>
               <button style={C.btn("d")} onClick={()=>setPeriodiOpen(false)}>Chiudi</button>
-              <button style={C.btn("s")} disabled={!periodiInclusi || periodiBloccanti > 0}
+              <button style={C.btn("i")} disabled={!flussiPeriodi.length || periodiBloccanti > 0} onClick={caricaNelBuilder}
+                      title="Mette i mesi nell'albero a sinistra, per aprirli e correggerli prima di esportare">
+                Carica nel builder
+              </button>
+              <button style={C.btn("s")} disabled={!flussiPeriodi.length || periodiBloccanti > 0}
                       onClick={()=>generaPeriodi(false)}>
                 Scarica ZIP
               </button>
-              {periodiBloccanti > 0 && periodiInclusi > periodiBloccanti && (
+              {periodiBloccanti > 0 && flussiPeriodi.length > 0 && (
                 <button style={C.btn("x")}
                         onClick={()=>{ if (confirm(`${periodiBloccanti} righe hanno errori e verranno saltate. Generare le altre?`)) generaPeriodi(true); }}>
                   Genera solo le valide

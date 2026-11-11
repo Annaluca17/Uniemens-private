@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   leggiEstrazioneVoci, vociImponibile, periodiDaEstrazione,
-  parsePeriodi, costruisciPeriodo,
+  parsePeriodi, costruisciPeriodo, dividiNominativo, flussiPerMese,
 } from './UniEmensPriv.jsx';
 
 /* Estrazione voci di fantasia, nella forma che esce dal gestionale: un .xls che e' una
@@ -66,13 +66,13 @@ describe('dall\'estrazione alle righe dell\'import periodi', () => {
 
   it('un mese con imponibile = una riga; i mesi senza imponibile non entrano', () => {
     const r = periodiDaEstrazione(rossi, '8103');
-    expect(r.testo).toBe('2024-09\t1698,32\t\t26\n2024-10\t849,16\t\t26');
+    expect(r.testo).toBe('2024-09\t1698,32\t\t26\tRSSMRA80A01H501U\n2024-10\t849,16\t\t26\tRSSMRA80A01H501U');
   });
 
   it('le righe prodotte si rileggono con l\'incolla, aliquota di default compresa', () => {
     const p = parsePeriodi(periodiDaEstrazione(rossi, '8103').testo);
-    expect(p.map(x => [x.AnnoMese, x.imponibile, x.aliquota, x.GiorniRetribuiti]))
-      .toEqual([['2024-09', 1698.32, 1.61, '26'], ['2024-10', 849.16, 1.61, '26']]);
+    expect(p.map(x => [x.AnnoMese, x.imponibile, x.aliquota, x.GiorniRetribuiti, x.cf]))
+      .toEqual([['2024-09', 1698.32, 1.61, '26', 'RSSMRA80A01H501U'], ['2024-10', 849.16, 1.61, '26', 'RSSMRA80A01H501U']]);
   });
 
   it('segnala le mensilita\' doppie invece di scrivere 52 giorni', () => {
@@ -155,5 +155,60 @@ describe('assunzione e cessazione indicate a mano', () => {
     // 9 settembre 2024 e' lunedi': la settimana che contiene l'1-7 non c'e'
     expect(e.setts.length).toBe(4);
     expect(e.voci.filter(v => v.liv === 'E')).toEqual([]);
+  });
+});
+
+describe('colonne facoltative dell\'incolla: codice fiscale, cognome, nome', () => {
+  it('senza codice fiscale la riga resta del lavoratore modello', () => {
+    expect(parsePeriodi('2021-01\t950,09')[0].cf).toBe('');
+  });
+  it('legge codice fiscale e nominativo anche con aliquota e giorni vuoti', () => {
+    const r = parsePeriodi('2021-02\t800,00\t\t\trssmra80a01h501u\tROSSI\tMARIO')[0];
+    expect([r.cf, r.cognome, r.nome, r.aliquota, r.giorniDefault]).toEqual(['RSSMRA80A01H501U', 'ROSSI', 'MARIO', 1.61, true]);
+  });
+});
+
+describe('cognome e nome dal nominativo unico dell\'estrazione', () => {
+  it('il caso semplice', () => {
+    expect(dividiNominativo('ROSSI MARIO', 'RSSMRA80A01H501U')).toEqual({ cognome: 'ROSSI', nome: 'MARIO', certo: true });
+  });
+  it('cognome composto: il taglio lo decide il codice fiscale', () => {
+    // DE LUCA -> DLC, ANNA -> NNA
+    expect(dividiNominativo('DE LUCA ANNA', 'DLCNNA85C41H501X')).toEqual({ cognome: 'DE LUCA', nome: 'ANNA', certo: true });
+  });
+  it('nome composto: il taglio lo decide il codice fiscale', () => {
+    // VERDI -> VRD, MARIA VITTORIA -> MVT (quattro consonanti: prima, terza, quarta)
+    expect(dividiNominativo('VERDI MARIA VITTORIA', 'VRDMVT68D54H501X')).toEqual({ cognome: 'VERDI', nome: 'MARIA VITTORIA', certo: true });
+  });
+  it('se il codice fiscale non torna, ultima parola = nome e lo segnala', () => {
+    expect(dividiNominativo('DE LUCA ANNA', 'XXXXXX85C41H501X')).toEqual({ cognome: 'DE LUCA', nome: 'ANNA', certo: false });
+  });
+});
+
+describe('un flusso per mese con tutti i dipendenti', () => {
+  const cfg = { TipoMittente: '5', CFMittente: '00000000000', RagSocMittente: 'COMUNE DI PROVA' };
+  const base = {
+    id: 'L1', CFLavoratore: 'RSSMRA80A01H501U', Cognome: 'ROSSI', Nome: 'MARIO',
+    Qualifica1: '2', Qualifica2: 'F', Qualifica3: 'D', giorni: [], EmettiSettimane: true,
+    AdeguaSettimane: true, SettimaneOverride: {}, AltreADebito: [], hasAssunzione: false, hasCessazione: false,
+  };
+  const bianchi = { ...base, CFLavoratore: 'BNCNNA85C41H501C', Cognome: 'BIANCHI', Nome: 'ANNA' };
+  const pos = { id: 'P1', Matricola: '1800000000', lavoratori: [] };
+  const az = { id: 'A1', AnnoMese: '', CFAzienda: '00000000000', RagSocAzienda: 'COMUNE DI PROVA', poss: [], collaboratori: [] };
+  const fai = (lav, testo) => costruisciPeriodo(cfg, az, pos, lav, parsePeriodi(testo)[0]);
+  const flussi = flussiPerMese([
+    fai(base, '2024-10\t849,16'), fai(base, '2024-09\t600,00'), fai(bianchi, '2024-10\t1500,00'),
+  ]);
+
+  it('i mesi escono in ordine, uno per file', () => {
+    expect(flussi.map(f => [f.AnnoMese, f.nome])).toEqual([['2024-09', 'UNIE2409.xml'], ['2024-10', 'UNIE2410.xml']]);
+  });
+  it('nello stesso mese i dipendenti stanno nella stessa matricola', () => {
+    expect(flussi[1].az.poss).toHaveLength(1);
+    expect(flussi[1].az.poss[0].lavoratori.map(l => l.Cognome)).toEqual(['ROSSI', 'BIANCHI']);
+    expect(flussi[0].az.poss[0].lavoratori.map(l => l.Cognome)).toEqual(['ROSSI']);
+  });
+  it('ognuno tiene il suo imponibile e il suo contributo', () => {
+    expect(flussi[1].az.poss[0].lavoratori.map(l => [l.Imponibile, l.Contributo])).toEqual([['849', '13,67'], ['1500', '24,15']]);
   });
 });
