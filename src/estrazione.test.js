@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   leggiEstrazioneVoci, vociImponibile, periodiDaEstrazione,
-  parsePeriodi, costruisciPeriodo, dividiNominativo, flussiPerMese,
+  parsePeriodi, costruisciPeriodo, dividiNominativo, flussiPerMese, buildPrivXML,
 } from './UniEmensPriv.jsx';
 
 /* Estrazione voci di fantasia, nella forma che esce dal gestionale: un .xls che e' una
@@ -133,9 +133,10 @@ describe('assunzione e cessazione indicate a mano', () => {
     expect(e.lav.hasAssunzione).toBe(false);
   });
 
-  it('i mesi prima dell\'assunzione e dopo la cessazione sono fuori dal rapporto', () => {
+  it('i mesi prima dell\'assunzione sono fuori; quelli dopo la cessazione no, sono NFOR', () => {
     expect(fai('2024-08\t100,00', RAPPORTO).fuori).toBe(true);
-    expect(fai('2025-04\t100,00', RAPPORTO).fuori).toBe(true);
+    expect(fai('2025-04\t100,00', RAPPORTO).fuori).toBe(false);
+    expect(fai('2025-04\t100,00', RAPPORTO).nfor).toBe(true);
     expect(fai('2024-09\t100,00', RAPPORTO).fuori).toBe(false);
     expect(fai('2025-03\t100,00', RAPPORTO).fuori).toBe(false);
   });
@@ -210,5 +211,96 @@ describe('un flusso per mese con tutti i dipendenti', () => {
   });
   it('ognuno tiene il suo imponibile e il suo contributo', () => {
     expect(flussi[1].az.poss[0].lavoratori.map(l => [l.Imponibile, l.Contributo])).toEqual([['849', '13,67'], ['1500', '24,15']]);
+  });
+});
+
+describe('NFOR: dopo la cessazione, senza riassunzione', () => {
+  const cfg = { TipoMittente: '1', CFMittente: '00000000000', RagSocMittente: 'COMUNE DI PROVA' };
+  const lav = {
+    id: 'L1', CFLavoratore: 'RSSMRA80A01H501U', Cognome: 'ROSSI', Nome: 'MARIO',
+    Qualifica1: '2', Qualifica2: 'F', Qualifica3: 'D', giorni: [], EmettiSettimane: true,
+    AdeguaSettimane: true, SettimaneOverride: {}, AltreADebito: [], InfoAggCausali: [],
+    DatiParticolari: [], DifferenzeAccredito: [], MisureCompensative: [],
+    hasAssunzione: false, hasCessazione: false, TipoCessazione: '1B', TipoAssunzione: '1', TipoLavStat: '',
+  };
+  const pos = { id: 'P1', Matricola: '1800000000', lavoratori: [], AltrePartiteADebito: [] };
+  const az = { id: 'A1', AnnoMese: '', CFAzienda: '00000000000', RagSocAzienda: 'COMUNE DI PROVA', poss: [], collaboratori: [] };
+  const fai = (testo, rapporto, modello = lav) => costruisciPeriodo(cfg, az, pos, modello, parsePeriodi(testo)[0], rapporto);
+  const DUE = { periodi: [
+    { assunzione: '2022-03-14', cessazione: '2022-12-31' },
+    { assunzione: '2024-02-01', cessazione: '2024-06-30' },
+  ] };
+
+  it('dentro un rapporto il mese e\' normale', () => {
+    const e = fai('2022-06\t800,00', DUE);
+    expect([e.nfor, e.fuori, e.lav.TipoLavStat, e.lav.GiorniRetribuiti]).toEqual([false, false, '', '26']);
+    expect(e.setts.length).toBeGreaterThan(0);
+  });
+
+  it('fra una cessazione e la riassunzione e\' NFOR', () => {
+    const e = fai('2023-05\t150,00', DUE);
+    expect([e.nfor, e.fuori, e.lav.TipoLavStat]).toEqual([true, false, 'NFOR']);
+  });
+
+  it('dopo l\'ultima cessazione e\' NFOR', () => {
+    expect(fai('2025-01\t90,00', DUE).nfor).toBe(true);
+  });
+
+  it('con la riassunzione torna normale, col quadro Assunzione del secondo rapporto', () => {
+    const e = fai('2024-02\t700,00', DUE);
+    expect([e.nfor, e.lav.hasAssunzione, e.lav.GiornoAssunzione]).toEqual([false, true, '1']);
+  });
+
+  it('ogni rapporto ha la sua cessazione', () => {
+    expect(fai('2022-12\t700,00', DUE).lav.GiornoCessazione).toBe('31');
+    expect(fai('2024-06\t700,00', DUE).lav.GiornoCessazione).toBe('30');
+  });
+
+  it('prima della prima assunzione il mese non si crea', () => {
+    const e = fai('2022-01\t100,00', DUE);
+    expect([e.fuori, e.nfor]).toEqual([true, false]);
+  });
+
+  it('il mese NFOR tiene imponibile e contributo ma non giorni, settimane, assunzione o cessazione', () => {
+    const e = fai('2023-05\t150,00', DUE);
+    expect([e.lav.Imponibile, e.lav.Contributo, e.lav.GiorniRetribuiti]).toEqual(['150', '2,42', '']);
+    expect(e.setts).toEqual([]);
+    expect([e.lav.hasAssunzione, e.lav.hasCessazione]).toEqual([false, false]);
+    expect(e.voci.filter(v => v.liv === 'E')).toEqual([]);
+  });
+
+  it('nell\'XML del mese NFOR non ci sono Giorno, Settimana e GiorniRetribuiti (10240E)', () => {
+    const xml = buildPrivXML(cfg, [fai('2023-05\t150,00', DUE).az]);
+    expect(xml).toContain('<TipoLavStat>NFOR</TipoLavStat>');
+    expect(xml).toContain('<Imponibile>150</Imponibile>');
+    expect(xml).not.toMatch(/<Giorno |<Settimana>|<GiorniRetribuiti>/);
+  });
+
+  it('nell\'XML del mese normale ci sono tutti e tre', () => {
+    const xml = buildPrivXML(cfg, [fai('2022-06\t800,00', DUE).az]);
+    expect(xml).not.toContain('TipoLavStat');
+    expect(xml).toMatch(/<Giorno /);
+    expect(xml).toMatch(/<Settimana>/);
+    expect(xml).toContain('<GiorniRetribuiti>26</GiorniRetribuiti>');
+  });
+
+  it('la scelta a mano comanda sul calcolo, in tutti e due i versi', () => {
+    expect(fai('2022-06\t800,00', { ...DUE, nfor: true }).lav.TipoLavStat).toBe('NFOR');
+    const e = fai('2023-05\t150,00', { ...DUE, nfor: false });
+    expect([e.nfor, e.lav.TipoLavStat, e.lav.GiorniRetribuiti]).toEqual([false, '', '26']);
+  });
+
+  it('un profilo preso da un flusso NFOR non rende NFOR i mesi lavorati', () => {
+    const profiloNfor = { ...lav, TipoLavStat: 'NFOR', EmettiSettimane: false };
+    const e = fai('2022-06\t800,00', DUE, profiloNfor);
+    expect([e.lav.TipoLavStat, e.lav.EmettiSettimane]).toEqual(['', true]);
+    expect(buildPrivXML(cfg, [e.az])).toMatch(/<Settimana>/);
+  });
+
+  it('senza date vale il profilo: se e\' NFOR, il mese esce NFOR e coerente', () => {
+    const profiloNfor = { ...lav, TipoLavStat: 'NFOR', EmettiSettimane: false };
+    const e = fai('2022-06\t800,00', undefined, profiloNfor);
+    expect(e.nfor).toBe(true);
+    expect(buildPrivXML(cfg, [e.az])).not.toMatch(/<Giorno |<GiorniRetribuiti>/);
   });
 });

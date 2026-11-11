@@ -43,7 +43,7 @@ const TIPO_Q3=[{v:"D",l:"D – Dipendente"},{v:"I",l:"I – Intermittente"}];
    un codice non c'e' piu' modo di tornare indietro. */
 export const TIPO_CONTRIB=[{v:"",l:"— non impostato (tag omesso)"},{v:"00",l:"00 – Standard"},{v:"H0",l:"H0 – Vigilanza"},{v:"J1",l:"J1 – Apprendistato ridotto"},{v:"J2",l:"J2 – Apprendistato"},{v:"55",l:"55 – Ex CFL"},{v:"71",l:"71"}];
 export const TIPO_LAV=[{v:"",l:"— non impostato (tag omesso)"},{v:"00",l:"00 – Standard"},{v:"PB",l:"PB – Borsa lavoro"}];
-const TIPO_LAVSTAT=[{v:"",l:"— standard"},{v:"NR00",l:"NR00 – Non retribuito"},{v:"NFOR",l:"NFOR – Non formale"}];
+const TIPO_LAVSTAT=[{v:"",l:"— standard"},{v:"NR00",l:"NR00 – Non retribuito"},{v:"NFOR",l:"NFOR – Non più in forza"}];
 export const TIPO_PAGA=[{v:"",l:"— non impostato (tag omesso)"},{v:"H",l:"H – Orario"},{v:"M",l:"M – Mensile"}];
 const TIPO_MENS=[{v:"12000",l:"12 mensilità"},{v:"13000",l:"13 mensilità"},{v:"14000",l:"14 mensilità"}];
 const TIPO_CESS=[{v:"1B",l:"1B – Fine TD"},{v:"1C",l:"1C – Fine TD (cantiere)"},{v:"3",l:"3 – Dimissioni"}];
@@ -941,7 +941,10 @@ export function buildPrivXML(cfg, aziende) {
 
         // Alcune ricostruzioni (denunce a zero, regolarizzazioni) non prevedono <Settimana>:
         // il tracciato standard le vuole anche a copertura 0, quindi la scelta resta esplicita.
-        const setts = lav.EmettiSettimane === false ? [] : calcSettimane(az.AnnoMese, lav.giorni, lav);
+        /* 10240E — per un lavoratore non più in forza (NFOR) settimane, calendario dei giorni
+           e GiorniRetribuiti non vanno: INPS scarta il flusso se li trova. */
+        const nfor = lav.TipoLavStat === "NFOR";
+        const setts = (lav.EmettiSettimane === false || nfor) ? [] : calcSettimane(az.AnnoMese, lav.giorni, lav);
         for (const s of setts) {
           x += `          <Settimana>\n`;
           x += `            <IdSettimana>${s.IdSettimana}</IdSettimana>\n`;
@@ -950,7 +953,7 @@ export function buildPrivXML(cfg, aziende) {
           x += `          </Settimana>\n`;
         }
 
-        for (const g of lav.giorni) {
+        for (const g of (nfor ? [] : lav.giorni)) {
           const gg = String(g.gg).padStart(2, "0");
           if (g.tipoCoperturaGiorn || g.evento) {
             x += `          <Giorno GG="${gg}">\n`;
@@ -986,7 +989,7 @@ export function buildPrivXML(cfg, aziende) {
            entrambi fa scartare il flusso ("invalid child element 'OreContribuite'", perché
            GiorniContribuiti ha già soddisfatto la scelta).
            Sul part-time si usa OreContribuite (ore per cui è stata versata contribuzione). */
-        if (lav.GiorniRetribuiti) x += `          <GiorniRetribuiti>${esc(lav.GiorniRetribuiti)}</GiorniRetribuiti>\n`;
+        if (lav.GiorniRetribuiti && !nfor) x += `          <GiorniRetribuiti>${esc(lav.GiorniRetribuiti)}</GiorniRetribuiti>\n`;
         if (usaOreContribuite(lav)) {
           x += `          <OreContribuite>${esc(lav.OreContribuite)}</OreContribuite>\n`;
         } else if (lav.GiorniContribuiti) {
@@ -1332,20 +1335,41 @@ export function periodiDaEstrazione(persona, voce) {
    L'imponibile resta INTERO nell'XML (il tracciato non ammette decimali), ma il
    contributo si calcola sull'imponibile REALE coi centesimi: sui flussi trasmessi
    le due regole divergono di un centesimo circa una volta su venti. */
-/* `rapporto` = { assunzione, cessazione } come date AAAA-MM-GG, entrambe facoltative.
-   Una data indicata comanda su quel che dice il modello: il quadro Assunzione (o
-   Cessazione) esce solo nel suo mese, e i mesi fuori dal rapporto tornano con `fuori`. */
+/* `rapporto` dice dove cade il mese rispetto ai rapporti di lavoro della persona:
+     { periodi: [{ assunzione, cessazione }, ...], nfor }      (date AAAA-MM-GG, facoltative)
+   o, per un rapporto solo, { assunzione, cessazione }.
+   - dentro un rapporto: mese normale, col quadro Assunzione o Cessazione nel suo mese;
+   - dopo una cessazione e senza riassunzione: NFOR, lavoratore non più in forza
+     (arretrati e competenze pagati dopo), senza giorni né settimane;
+   - prima della prima assunzione: `fuori`, non si crea.
+   `nfor` vero o falso è la scelta fatta a mano e comanda sul calcolo. Senza date resta
+   quel che dice il modello. */
 export function costruisciPeriodo(cfg, azMod, posMod, lavMod, riga, rapporto) {
-  const ass = rapporto?.assunzione || "", cess = rapporto?.cessazione || "";
-  const diAss = !!ass && ass.slice(0, 7) === riga.AnnoMese;
-  const diCess = !!cess && cess.slice(0, 7) === riga.AnnoMese;
-  const fuori = (!!ass && riga.AnnoMese < ass.slice(0, 7)) || (!!cess && riga.AnnoMese > cess.slice(0, 7));
-  const quadri = {
-    ...(ass ? { hasAssunzione: diAss, GiornoAssunzione: diAss ? String(+ass.slice(8, 10)) : "" } : {}),
-    ...(cess ? { hasCessazione: diCess, GiornoCessazione: diCess ? String(+cess.slice(8, 10)) : "" } : {}),
-  };
-  const [y, m] = riga.AnnoMese.split("-").map(Number);
-  const nGiorni = giorniMese(riga.AnnoMese);
+  const am = riga.AnnoMese;
+  const periodi = (rapporto?.periodi || [{ assunzione: rapporto?.assunzione, cessazione: rapporto?.cessazione }])
+    .map(x => ({ ass: x.assunzione || "", cess: x.cessazione || "" }))
+    .filter(x => x.ass || x.cess);
+  const conAss = periodi.some(x => x.ass), conCess = periodi.some(x => x.cess);
+  const pAss = periodi.find(x => x.ass && x.ass.slice(0, 7) === am);
+  const pCess = periodi.find(x => x.cess && x.cess.slice(0, 7) === am);
+  const dentro = periodi.some(x => (!x.ass || am >= x.ass.slice(0, 7)) && (!x.cess || am <= x.cess.slice(0, 7)));
+  const dopoCess = periodi.some(x => x.cess && am > x.cess.slice(0, 7));
+  const nforCalcolato = periodi.length ? (!dentro && dopoCess) : lavMod.TipoLavStat === "NFOR";
+  const nfor = rapporto?.nfor ?? nforCalcolato;
+  const fuori = rapporto?.nfor == null && periodi.length > 0 && !dentro && !dopoCess;
+  const diAss = !nfor && !!pAss, diCess = !nfor && !!pCess;
+  const quadri = nfor
+    ? { hasAssunzione: false, GiornoAssunzione: "", hasCessazione: false, GiornoCessazione: "" }
+    : {
+        ...(conAss ? { hasAssunzione: diAss, GiornoAssunzione: diAss ? String(+pAss.ass.slice(8, 10)) : "" } : {}),
+        ...(conCess ? { hasCessazione: diCess, GiornoCessazione: diCess ? String(+pCess.cess.slice(8, 10)) : "" } : {}),
+      };
+  /* Il profilo può arrivare da un flusso NFOR (o il contrario): lo stato lo decide il mese. */
+  const stato = nfor
+    ? { TipoLavStat: "NFOR" }
+    : lavMod.TipoLavStat === "NFOR" ? { TipoLavStat: "", EmettiSettimane: true } : {};
+  const [y, m] = am.split("-").map(Number);
+  const nGiorni = giorniMese(am);
   const giorni = Array.from({ length: nGiorni }, (_, i) => ({
     gg: i + 1,
     lavorato: new Date(y, m - 1, i + 1).getDay() === 0 ? "N" : "S",
@@ -1353,11 +1377,11 @@ export function costruisciPeriodo(cfg, azMod, posMod, lavMod, riga, rapporto) {
   }));
   const contributo = Math.round(riga.imponibile * riga.aliquota) / 100;
   const lav = {
-    ...lavMod, ...quadri, id: uid(), giorni, SettimaneOverride: {},
+    ...lavMod, ...quadri, ...stato, id: uid(), giorni, SettimaneOverride: {},
     Imponibile: String(Math.round(riga.imponibile)),
     RetribTeorica: String(Math.round(riga.imponibile)),
     Contributo: contributo.toFixed(2).replace(".", ","),
-    GiorniRetribuiti: riga.GiorniRetribuiti,
+    GiorniRetribuiti: nfor ? "" : riga.GiorniRetribuiti,
   };
   /* Mese iniziato o finito a metà senza giorni dichiarati: 26 sarebbe falso, si contano
      i giorni lavorabili dentro il rapporto. Un valore scritto a mano non si tocca. */
@@ -1367,17 +1391,19 @@ export function costruisciPeriodo(cfg, azMod, posMod, lavMod, riga, rapporto) {
     lav.GiorniRetribuiti = String(Math.min(26, n));
   }
   const az = {
-    ...azMod, id: uid(), AnnoMese: riga.AnnoMese,
+    ...azMod, id: uid(), AnnoMese: am,
     poss: [{ ...posMod, id: uid(), lavoratori: [lav] }],
     collaboratori: [],
   };
-  const setts = calcSettimane(az.AnnoMese, lav.giorni, lav);
+  const setts = nfor ? [] : calcSettimane(az.AnnoMese, lav.giorni, lav);
   const voci = [
     ...validaLav(lav, az.AnnoMese),
-    ...checkSettimane(setts, lav).map(msg => ({ liv: "W", msg })),
+    ...(nfor ? [] : checkSettimane(setts, lav).map(msg => ({ liv: "W", msg }))),
   ];
+  if (diAss && diCess && pAss !== pCess)
+    voci.push({ liv: "W", msg: "cessazione e riassunzione nello stesso mese: servono due denunce individuali, da sistemare a mano" });
   return {
-    riga, az, lav, setts, voci, fuori,
+    riga, az, lav, setts, voci, fuori, nfor,
     nome: exportFilename(cfg, [az]),
     giorniLav: countGiorniLav(giorni),
     contributo,
@@ -1402,9 +1428,10 @@ export default function UniEmensPriv() {
   const [periodiEsclusi, setPeriodiEsclusi] = useState({});   // { "2021-03": true }
   const [periodiDa, setPeriodiDa] = useState("");
   const [periodiA, setPeriodiA] = useState("");
-  /* Per persona (chiave = CF, "" = lavoratore modello): { cognome, nome, ass, cess, off },
-     con ass/cess come date AAAA-MM-GG. Solo quel che è stato toccato a mano. */
+  /* Per persona (chiave = CF, "" = lavoratore modello): { cognome, nome, rapporti, off },
+     con rapporti = [{ ass, cess }] come date AAAA-MM-GG. Solo quel che è stato toccato a mano. */
   const [periodiPersone, setPeriodiPersone] = useState({});
+  const [periodiNfor, setPeriodiNfor] = useState({});         // { "2025-04|CF": true|false } scelta a mano
   const [halley, setHalley] = useState(null);                 // { file, persone }
   const [halleyCf, setHalleyCf] = useState("");
   const [halleyVoce, setHalleyVoce] = useState("");
@@ -1642,7 +1669,7 @@ export default function UniEmensPriv() {
       cognome: st.cognome ?? (r.cognome || noto?.Cognome || div?.cognome || ""),
       nome: st.nome ?? (r.nome || noto?.Nome || div?.nome || ""),
       incerto: st.cognome == null && st.nome == null && !r.cognome && !noto && !!div && !div.certo,
-      ass: st.ass || "", cess: st.cess || "", off: !!st.off, mesi: [r.AnnoMese],
+      rapporti: st.rapporti?.length ? st.rapporti : [{ ass: "", cess: "" }], off: !!st.off, mesi: [r.AnnoMese],
     };
     personePeriodi.push(pers);
   });
@@ -1654,19 +1681,21 @@ export default function UniEmensPriv() {
         if (r.errore) return { riga: r, errore: r.errore };
         const pers = perChiave[r.cf || ""];
         if (!pers.base) return { riga: r, pers, errore: "manca un lavoratore tipo da cui prendere qualifiche e contratto" };
-        /* Chi non e' nel builder copia il profilo dal modello, ma non la sua assunzione
-           o cessazione: quelle sono di un'altra persona. */
+        /* Chi non e' nel builder copia il profilo dal modello, ma non la sua assunzione,
+           la sua cessazione e i suoi recapiti: quelli sono di un'altra persona. */
         const base = pers.daModello ? pers.base
           : pers.nuovo ? { ...pers.base, CFLavoratore: pers.cf, Cognome: pers.cognome, Nome: pers.nome,
+                           EmailLav: "", CellLav: "",
                            hasAssunzione: false, GiornoAssunzione: "", hasCessazione: false, GiornoCessazione: "" }
           : { ...pers.base, Cognome: pers.cognome, Nome: pers.nome };
         const e = costruisciPeriodo(cfg, azModello, posModello, base, r,
-                                    { assunzione: pers.ass, cessazione: pers.cess });
+                                    { periodi: pers.rapporti.map(x => ({ assunzione: x.ass, cessazione: x.cess })),
+                                      nfor: periodiNfor[chiaveRiga(r)] });
         e.pers = pers;
         (halleyAvvisi[chiaveRiga(r)] || []).forEach(msg => e.voci.push({ liv: "W", msg }));
         /* Le mensilità da creare: persona inclusa, dentro il rapporto, dentro l'intervallo, con la spunta. */
         e.escluso = pers.off ? "persona esclusa"
-          : e.fuori ? "fuori dal rapporto di lavoro"
+          : e.fuori ? "prima dell'assunzione"
           : ((daAM && r.AnnoMese < daAM) || (aAM && r.AnnoMese > aAM)) ? "fuori dall'intervallo scelto"
           : periodiEsclusi[chiaveRiga(r)] ? "escluso a mano" : "";
         return e;
@@ -1707,7 +1736,7 @@ export default function UniEmensPriv() {
       r.nonTD.forEach(am => { esclusi[`${am}|${p.cf}`] = true; });
     });
     setHalleyCf(cf); setHalleyVoce(v);
-    setPeriodiTesto(righe.join("\n")); setHalleyAvvisi(avvisi); setPeriodiEsclusi(esclusi);
+    setPeriodiTesto(righe.join("\n")); setHalleyAvvisi(avvisi); setPeriodiEsclusi(esclusi); setPeriodiNfor({});
   };
   const caricaHalley = (file) => {
     const reader = new FileReader();
@@ -1942,7 +1971,7 @@ export default function UniEmensPriv() {
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:"11px"}}>
                   <thead>
                     <tr style={{background:"#F1F5F9",position:"sticky",top:0}}>
-                      {["", "Cognome", "Nome", "Codice fiscale", "Profilo", "Cedolini", "Assunzione", "Cessazione"].map((h,i)=>(
+                      {["", "Cognome", "Nome", "Codice fiscale", "Profilo", "Cedolini", "Rapporti di lavoro: assunzione → cessazione"].map((h,i)=>(
                         <th key={i} style={{padding:"5px 7px",textAlign:"left",fontWeight:"700",borderBottom:"1px solid #E2E8F0"}}>{h}</th>
                       ))}
                     </tr>
@@ -1970,10 +1999,24 @@ export default function UniEmensPriv() {
                             {x.incerto && <span style={{color:"#B45309"}}> · controlla cognome e nome</span>}
                           </td>
                           <td style={{padding:"4px 7px"}}>{mesi[0]}{mesi.length > 1 ? ` → ${mesi[mesi.length-1]}` : ""} ({mesi.length})</td>
-                          <td style={{padding:"4px 7px"}}><input type="date" value={x.ass} onChange={e=>setPers(x.k, {ass: e.target.value})} style={campo}/></td>
-                          <td style={{padding:"4px 7px"}}>
-                            <input type="date" value={x.cess} onChange={e=>setPers(x.k, {cess: e.target.value})}
-                                   style={{...campo, border:`1px solid ${x.ass && x.cess && x.cess < x.ass ? "#DC2626" : "#CBD5E1"}`}}/>
+                          <td style={{padding:"4px 7px",whiteSpace:"nowrap"}}>
+                            {x.rapporti.map((rp, j) => {
+                              const cambia = (patch) => setPers(x.k, { rapporti: x.rapporti.map((q, i) => i === j ? { ...q, ...patch } : q) });
+                              return (
+                                <div key={j} style={{display:"flex",gap:"4px",alignItems:"center",marginBottom:"2px"}}>
+                                  <input type="date" value={rp.ass} onChange={e=>cambia({ass: e.target.value})} style={campo}/>
+                                  <span>→</span>
+                                  <input type="date" value={rp.cess} onChange={e=>cambia({cess: e.target.value})}
+                                         style={{...campo, border:`1px solid ${rp.ass && rp.cess && rp.cess < rp.ass ? "#DC2626" : "#CBD5E1"}`}}/>
+                                  {x.rapporti.length > 1 &&
+                                    <button style={{...C.btn("d"),padding:"1px 7px"}} title="Togli questo rapporto"
+                                            onClick={()=>setPers(x.k, { rapporti: x.rapporti.filter((_, i) => i !== j) })}>−</button>}
+                                  {j === x.rapporti.length - 1 &&
+                                    <button style={{...C.btn("d"),padding:"1px 7px"}} title="Aggiungi una riassunzione"
+                                            onClick={()=>setPers(x.k, { rapporti: [...x.rapporti, { ass: "", cess: "" }] })}>+</button>}
+                                </div>
+                              );
+                            })}
                           </td>
                         </tr>
                       );
@@ -1991,8 +2034,9 @@ export default function UniEmensPriv() {
                 </label>
               ))}
               <span style={{fontSize:"11px",color:"#6A7282",flex:1,minWidth:"260px"}}>
-                Assunzione e cessazione sono facoltative e l&apos;estrazione voci non le riporta: se le indichi, il quadro esce solo nel suo
-                mese (tipo preso dal profilo) e i mesi fuori dal rapporto non vengono creati.
+                Le date sono facoltative e l&apos;estrazione voci non le riporta. Se le indichi: il quadro Assunzione o Cessazione esce solo
+                nel suo mese (tipo preso dal profilo); i mesi dopo una cessazione, senza riassunzione, escono <b>NFOR</b> (non più in forza,
+                senza giorni né settimane); quelli prima dell&apos;assunzione non vengono creati. La spunta NFOR su ogni riga si può cambiare a mano.
               </span>
             </div>
             {esitiPeriodi.length > 0 && (
@@ -2004,7 +2048,7 @@ export default function UniEmensPriv() {
                         <input type="checkbox" checked={!Object.keys(periodiEsclusi).length}
                                onChange={e=>setPeriodiEsclusi(e.target.checked ? {} : Object.fromEntries(righePeriodi.filter(r=>r.AnnoMese).map(r=>[chiaveRiga(r),true])))}/>
                       </th>
-                      {["", "Mese", "Persona", "File", "Imponibile", "Contributo", "gg retr.", "Ass./Cess.", "Settimane", "Esito"].map((h,i)=>(
+                      {["", "Mese", "Persona", "File", "Imponibile", "Contributo", "NFOR", "gg retr.", "Ass./Cess.", "Settimane", "Esito"].map((h,i)=>(
                         <th key={i} style={{padding:"5px 7px",textAlign:"left",fontWeight:"700",borderBottom:"1px solid #E2E8F0"}}>{h}</th>
                       ))}
                     </tr>
@@ -2027,6 +2071,10 @@ export default function UniEmensPriv() {
                           <td style={{padding:"4px 7px",fontFamily:"ui-monospace,monospace"}}>{e.nome || ""}</td>
                           <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Imponibile : ""}</td>
                           <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.Contributo : ""}</td>
+                          <td style={{padding:"4px 7px",textAlign:"center"}}>
+                            {e.lav && k && <input type="checkbox" checked={!!e.nfor} title="Lavoratore non più in forza in questo mese"
+                              onChange={ev=>setPeriodiNfor(x=>({...x, [k]: ev.target.checked}))}/>}
+                          </td>
                           <td style={{padding:"4px 7px",textAlign:"right"}}>{e.lav ? e.lav.GiorniRetribuiti : ""}</td>
                           <td style={{padding:"4px 7px"}}>
                             {e.lav ? [e.lav.hasAssunzione && `ass. il ${e.lav.GiornoAssunzione}`, e.lav.hasCessazione && `cess. il ${e.lav.GiornoCessazione}`].filter(Boolean).join(" · ") : ""}
